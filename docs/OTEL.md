@@ -18,12 +18,15 @@ constructed and no OTLP egress happens, regardless of `--otlp-protocol` or
 Set `--otlp-endpoint` (or `OTLP_ENDPOINT`) to your OTLP receiver's address:
 
 ```
-mosquitto-exporter \
+OTEL_EXPORTER_OTLP_INSECURE=true mosquitto-exporter \
   --endpoint tcp://mosquitto:1883 \
   --otlp-endpoint localhost:4317 \
   --otlp-protocol grpc \
   --otlp-interval 30s
 ```
+
+The `INSECURE` setting is only for a plaintext local collector. Omit it when
+the receiver uses TLS.
 
 | Flag | Env var | Default | Notes |
 |---|---|---|---|
@@ -35,7 +38,9 @@ There is no `--otlp-headers`, `--otlp-insecure`, `--otlp-timeout`, or
 resource-attribute flag. The OTel SDK itself already honours the standard
 `OTEL_EXPORTER_OTLP_*` and `OTEL_RESOURCE_ATTRIBUTES` environment variables
 for those concerns (TLS, headers, timeouts, resource attributes) - use those
-directly rather than expecting this exporter to re-expose them.
+directly rather than expecting this exporter to re-expose them. Credentials
+in `--otlp-endpoint` are rejected; use `OTEL_EXPORTER_OTLP_HEADERS` for
+authentication so secrets do not appear in argv.
 
 ## The Prometheus exporter is an experimental v0.x module
 

@@ -189,7 +189,10 @@ func Run(ctx context.Context, cfg config.Config) error {
 		meterProviderOpts = append(meterProviderOpts, sdkmetric.WithReader(otlpReader))
 	}
 	meterProvider := sdkmetric.NewMeterProvider(meterProviderOpts...)
-	broker := newBrokerMetrics(meterProvider.Meter(otelMeterName), store)
+	if err := registerBrokerMetrics(meterProvider.Meter(otelMeterName), store); err != nil {
+		_ = meterProvider.Shutdown(context.Background())
+		return fmt.Errorf("setting up broker metrics: %w", err)
+	}
 
 	opts := mqtt.NewClientOptions()
 	opts.SetCleanSession(true)
@@ -218,16 +221,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 		store.SetConnected(true)
 		// subscribe on every (re)connect
 		token := client.Subscribe("$SYS/#", 0, func(_ mqtt.Client, msg mqtt.Message) {
-			sample, ok := store.Update(msg.Topic(), string(msg.Payload()))
-			if !ok {
-				return
-			}
-			// Declares the OTel instrument the first time this metric name is
-			// seen; a cheap no-op on every later message for the same name
-			// (otelmetrics.go). Store itself stays unaware of OTel entirely.
-			if ensureErr := broker.Ensure(sample); ensureErr != nil {
-				slog.Warn("declaring OTel instrument", "metric", sample.Name, "error", ensureErr)
-			}
+			store.Update(msg.Topic(), string(msg.Payload()))
 		})
 		if !token.WaitTimeout(10 * time.Second) {
 			slog.Error("timeout subscribing to topic", "topic", "$SYS/#")
@@ -289,6 +283,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 			runErr = errors.New("timed out stopping MQTT connection attempt")
 		}
 	}
+	store.SetConnected(false)
 
 	// Shutdown order (DESIGN.md §7 Phase 4): MQTT is already stopped above;
 	// MeterProvider.Shutdown performs its own final collect/export per

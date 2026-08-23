@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -42,7 +43,7 @@ type Config struct {
 func (c Config) Validate() error {
 	u, err := url.Parse(c.Endpoint)
 	if err != nil {
-		return fmt.Errorf("invalid endpoint %q: %w", c.Endpoint, err)
+		return fmt.Errorf("invalid endpoint: %w", err)
 	}
 	if u.User != nil {
 		return fmt.Errorf("endpoint must not contain userinfo (user:pass@host); use --user/--pass-file or MQTT_USER/MQTT_PASS instead")
@@ -54,6 +55,9 @@ func (c Config) Validate() error {
 	// interval are then inert and must not fail validation regardless of
 	// their value (decision 10.6).
 	if c.OTLPEndpoint != "" {
+		if strings.Contains(c.OTLPEndpoint, "@") {
+			return fmt.Errorf("otlp-endpoint must not contain credentials; use OTEL_EXPORTER_OTLP_HEADERS instead")
+		}
 		if c.OTLPProtocol != "grpc" && c.OTLPProtocol != "http" {
 			return fmt.Errorf("otlp-protocol must be %q or %q, got %q", "grpc", "http", c.OTLPProtocol)
 		}

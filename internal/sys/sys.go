@@ -7,6 +7,7 @@ package sys
 
 import (
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -24,8 +25,17 @@ type Sample struct {
 	Name   string            // final Prometheus name, e.g. "mosquitto_broker_bytes_received_total"
 	Kind   Kind              // meaningless when Resolve's Reason is not OK
 	Help   string            // meaningless when Resolve's Reason is not OK
+	Unit   string            // UCUM unit: "1", "By", "s", or "1/s"
 	Labels map[string]string // nil when the series has none
 	Value  float64           // meaningless when Resolve's Reason is not OK
+}
+
+// Instrument describes one unique OTel instrument in the static table.
+type Instrument struct {
+	Name string
+	Kind Kind
+	Help string
+	Unit string
 }
 
 // Reason explains why Resolve did or did not produce a Sample.
@@ -46,6 +56,7 @@ type topicSpec struct {
 	name   string
 	kind   Kind
 	help   string
+	unit   string
 	labels map[string]string
 }
 
@@ -68,19 +79,19 @@ var topics = map[string]topicSpec{
 	},
 	"$SYS/broker/bytes/received": {
 		name: "mosquitto_broker_bytes_received_total", kind: Counter,
-		help: "The total number of bytes received since the broker started.",
+		help: "The total number of bytes received since the broker started.", unit: "By",
 	},
 	"$SYS/broker/bytes/sent": {
 		name: "mosquitto_broker_bytes_sent_total", kind: Counter,
-		help: "The total number of bytes sent since the broker started.",
+		help: "The total number of bytes sent since the broker started.", unit: "By",
 	},
 	"$SYS/broker/publish/bytes/received": {
 		name: "mosquitto_broker_publish_bytes_received_total", kind: Counter,
-		help: "The total number of bytes received in PUBLISH messages since the broker started.",
+		help: "The total number of bytes received in PUBLISH messages since the broker started.", unit: "By",
 	},
 	"$SYS/broker/publish/bytes/sent": {
 		name: "mosquitto_broker_publish_bytes_sent_total", kind: Counter,
-		help: "The total number of bytes sent in PUBLISH messages since the broker started.",
+		help: "The total number of bytes sent in PUBLISH messages since the broker started.", unit: "By",
 	},
 	"$SYS/broker/publish/messages/received": {
 		name: "mosquitto_broker_publish_messages_received_total", kind: Counter,
@@ -145,7 +156,7 @@ var topics = map[string]topicSpec{
 	},
 	"$SYS/broker/store/messages/bytes": {
 		name: "mosquitto_broker_store_messages_bytes", kind: Gauge,
-		help: "The number of bytes currently used to store messages.",
+		help: "The number of bytes currently used to store messages.", unit: "By",
 	},
 	"$SYS/broker/subscriptions/count": {
 		name: "mosquitto_broker_subscriptions", kind: Gauge,
@@ -162,11 +173,11 @@ var topics = map[string]topicSpec{
 	},
 	"$SYS/broker/heap/current": {
 		name: "mosquitto_broker_heap_current_bytes", kind: Gauge,
-		help: "The current size of the heap memory in use by the broker, in bytes.",
+		help: "The current size of the heap memory in use by the broker, in bytes.", unit: "By",
 	},
 	"$SYS/broker/heap/maximum": {
 		name: "mosquitto_broker_heap_maximum_bytes", kind: Gauge,
-		help: "The largest amount of heap memory used by the broker, in bytes.",
+		help: "The largest amount of heap memory used by the broker, in bytes.", unit: "By",
 	},
 	"$SYS/broker/packet/out/count": {
 		name: "mosquitto_broker_packet_out_count", kind: Gauge,
@@ -174,12 +185,12 @@ var topics = map[string]topicSpec{
 	},
 	"$SYS/broker/packet/out/bytes": {
 		name: "mosquitto_broker_packet_out_bytes", kind: Gauge,
-		help: "The number of bytes pending output to the network.",
+		help: "The number of bytes pending output to the network.", unit: "By",
 	},
 	// Fix (§3.4): monotonically-reporting wall clock, was exported as a Counter.
 	"$SYS/broker/uptime": {
 		name: "mosquitto_broker_uptime_seconds", kind: Gauge,
-		help: "The number of seconds since the broker started.",
+		help: "The number of seconds since the broker started.", unit: "s",
 	},
 
 	// --- load/** shape change (§6.3): 27 series -> 3, one name + a window label.
@@ -189,16 +200,19 @@ var topics = map[string]topicSpec{
 	"$SYS/broker/load/connections/1min": {
 		name: "mosquitto_broker_load_connections", kind: Gauge,
 		help:   "The moving average of the number of CONNECT packets received by the broker.",
+		unit:   "1/s",
 		labels: map[string]string{"window": "1m"},
 	},
 	"$SYS/broker/load/connections/5min": {
 		name: "mosquitto_broker_load_connections", kind: Gauge,
 		help:   "The moving average of the number of CONNECT packets received by the broker.",
+		unit:   "1/s",
 		labels: map[string]string{"window": "5m"},
 	},
 	"$SYS/broker/load/connections/15min": {
 		name: "mosquitto_broker_load_connections", kind: Gauge,
 		help:   "The moving average of the number of CONNECT packets received by the broker.",
+		unit:   "1/s",
 		labels: map[string]string{"window": "15m"},
 	},
 }
@@ -206,6 +220,11 @@ var topics = map[string]topicSpec{
 // topicVersion is handled outside the table: its payload is a version
 // string, not a number, and it renders as an info-metric (§6.2).
 const topicVersion = "$SYS/broker/version"
+
+var infoSpec = topicSpec{
+	name: "mosquitto_broker_info", kind: Gauge, unit: "1",
+	help: "Information about the running broker; the sample value is always 1.",
+}
 
 // Bridge connection state topics carry the admin-controlled remote_clientid
 // in the middle of the topic, so they cannot be a static map key. Sliced by
@@ -215,6 +234,44 @@ const (
 	bridgeTopicPrefix = "$SYS/broker/connection/"
 	bridgeTopicSuffix = "/state"
 )
+
+var bridgeSpec = topicSpec{
+	name: "mosquitto_broker_bridge_connected", kind: Gauge, unit: "1",
+	help: "Whether this broker's connection to a bridge is currently established (1) or not (0).",
+}
+
+func (s topicSpec) instrument() Instrument {
+	unit := s.unit
+	if unit == "" {
+		unit = "1"
+	}
+	return Instrument{Name: s.name, Kind: s.kind, Help: s.help, Unit: unit}
+}
+
+func (s topicSpec) sample(value float64, labels map[string]string) Sample {
+	i := s.instrument()
+	return Sample{Name: i.Name, Kind: i.Kind, Help: i.Help, Unit: i.Unit, Labels: labels, Value: value}
+}
+
+// Instruments returns the complete unique instrument set in stable name
+// order. It is static, so callers can register one callback once at startup.
+func Instruments() []Instrument {
+	byName := make(map[string]Instrument, len(topics)+2)
+	for _, spec := range topics {
+		i := spec.instrument()
+		byName[i.Name] = i
+	}
+	for _, spec := range []topicSpec{infoSpec, bridgeSpec} {
+		i := spec.instrument()
+		byName[i.Name] = i
+	}
+	out := make([]Instrument, 0, len(byName))
+	for _, i := range byName {
+		out = append(out, i)
+	}
+	slices.SortFunc(out, func(a, b Instrument) int { return strings.Compare(a.Name, b.Name) })
+	return out
+}
 
 // isExcludedLoadSeries reports whether topic is one of the 24 load/** series
 // dropped by §6.3. They are pure EWMAs of counters we already export, so a
@@ -268,7 +325,7 @@ func Resolve(topic, payload string) (Sample, Reason) {
 	if !ok {
 		return Sample{}, InvalidPayload
 	}
-	return Sample{Name: spec.name, Kind: spec.kind, Help: spec.help, Labels: spec.labels, Value: value}, OK
+	return spec.sample(value, spec.labels), OK
 }
 
 // resolveVersion handles $SYS/broker/version. The payload is a string like
@@ -280,13 +337,7 @@ func resolveVersion(payload string) (Sample, Reason) {
 		return Sample{}, InvalidPayload
 	}
 	version := fields[len(fields)-1]
-	return Sample{
-		Name:   "mosquitto_broker_info",
-		Kind:   Gauge,
-		Help:   "Information about the running broker; the sample value is always 1.",
-		Labels: map[string]string{"mosquitto_version": version},
-		Value:  1,
-	}, OK
+	return infoSpec.sample(1, map[string]string{"mosquitto_version": version}), OK
 }
 
 // bridgeClientID reports the remote_clientid embedded in a bridge connection
@@ -326,13 +377,7 @@ func resolveBridge(id, payload string) (Sample, Reason) {
 	if !ok {
 		return Sample{}, NotExported
 	}
-	return Sample{
-		Name:   "mosquitto_broker_bridge_connected",
-		Kind:   Gauge,
-		Help:   "Whether this broker's connection to a bridge is currently established (1) or not (0).",
-		Labels: map[string]string{"mosquitto_bridge_name": name},
-		Value:  value,
-	}, OK
+	return bridgeSpec.sample(value, map[string]string{"mosquitto_bridge_name": name}), OK
 }
 
 // sanitizeLabelValue makes an admin-controlled remote_clientid safe to carry

@@ -113,14 +113,7 @@ func NewStore(sysInterval time.Duration) *Store {
 
 // Update resolves topic/payload through sys.Resolve and records the result.
 // Called from the MQTT handler goroutine.
-//
-// ok reports whether reason was sys.OK, in which case sample is the resolved
-// series - regardless of whether it was actually cached (a topic dropped for
-// being new at a full cache still resolved OK). The caller uses this to feed
-// brokerMetrics.Ensure (server.go), which declares the corresponding OTel
-// instrument the first time each metric name is seen (DESIGN.md §7 Phase 4);
-// Store itself stays unaware of OTel entirely.
-func (s *Store) Update(topic, payload string) (sample sys.Sample, ok bool) {
+func (s *Store) Update(topic, payload string) {
 	sample, reason := sys.Resolve(topic, payload)
 
 	s.mu.Lock()
@@ -131,13 +124,13 @@ func (s *Store) Update(topic, payload string) (sample sys.Sample, ok bool) {
 		// Recognised and deliberately dropped (§6.3). Not counted: it is not
 		// a surprise, and counting it would make the unknown-topic counter
 		// rise forever on a healthy broker.
-		return sys.Sample{}, false
+		return
 	case sys.NotExported:
 		s.unknownTopics++
-		return sys.Sample{}, false
+		return
 	case sys.InvalidPayload:
 		s.invalidPayloads++
-		return sys.Sample{}, false
+		return
 	}
 
 	if topic == uptimeTopic && s.connected {
@@ -147,7 +140,7 @@ func (s *Store) Update(topic, payload string) (sample sys.Sample, ok bool) {
 	if cached, known := s.samples[topic]; known && sample.Name != "mosquitto_broker_info" {
 		cached.Value = sample.Value
 		s.samples[topic] = cached
-		return sample, true
+		return
 	}
 
 	valueType := prometheus.GaugeValue
@@ -157,14 +150,14 @@ func (s *Store) Update(topic, payload string) (sample sys.Sample, ok bool) {
 	desc := prometheus.NewDesc(sample.Name, sample.Help, nil, sample.Labels)
 	if _, err := prometheus.NewConstMetric(desc, valueType, sample.Value); err != nil {
 		s.droppedTopics++
-		return sample, true
+		return
 	}
 	next := cachedSample{Sample: sample, desc: desc}
 	if _, known := s.samples[topic]; known {
 		// Replace the whole sample, not just its value: info-metric labels can
 		// change after a broker upgrade.
 		s.samples[topic] = next
-		return sample, true
+		return
 	}
 
 	// Alias topics share a descriptor. Keep one cache entry and let the most
@@ -174,7 +167,7 @@ func (s *Store) Update(topic, payload string) (sample sys.Sample, ok bool) {
 	for key, cached := range s.samples {
 		if cached.desc.String() == desc.String() {
 			s.samples[key] = next
-			return sample, true
+			return
 		}
 	}
 
@@ -184,10 +177,9 @@ func (s *Store) Update(topic, payload string) (sample sys.Sample, ok bool) {
 		// can legitimately go hours without a republish. Dropping it would
 		// make the series vanish exactly when everything is fine.
 		s.droppedTopics++
-		return sample, true
+		return
 	}
 	s.samples[topic] = next
-	return sample, true
 }
 
 // SetConnected records the broker connection state. Called from the
@@ -241,7 +233,7 @@ func (s *Store) Collect(ch chan<- prometheus.Metric) {
 }
 
 // BrokerSnapshot is the OTel instrument set's only view into Store
-// (otelmetrics.go's brokerMetrics.observe callback): up reports the same
+// (otelmetrics.go's callback): up reports the same
 // connection/heartbeat gate Collect uses for mosquitto_up, and samples is
 // every cached $SYS value at the instant up was computed - both read under
 // one lock so they describe the same instant (mirrors Collect's own

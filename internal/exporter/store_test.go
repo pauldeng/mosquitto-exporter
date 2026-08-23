@@ -26,6 +26,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/goleak"
 )
 
@@ -557,17 +558,13 @@ func TestMetricsGolden(t *testing.T) {
 	}
 	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(promReader))
 	t.Cleanup(func() { _ = meterProvider.Shutdown(context.Background()) })
-	brokerMetrics := newBrokerMetrics(meterProvider.Meter(otelMeterName), store)
+	if err := registerBrokerMetrics(meterProvider.Meter(otelMeterName), store); err != nil {
+		t.Fatalf("registerBrokerMetrics: %v", err)
+	}
 
 	store.SetConnected(true)
 	for _, m := range goldenMessages {
-		sample, ok := store.Update(m.topic, m.payload)
-		if !ok {
-			continue
-		}
-		if err := brokerMetrics.Ensure(sample); err != nil {
-			t.Fatalf("brokerMetrics.Ensure(%s): %v", sample.Name, err)
-		}
+		store.Update(m.topic, m.payload)
 	}
 
 	rec := httptest.NewRecorder()
@@ -611,6 +608,44 @@ func TestMetricsGolden(t *testing.T) {
 	}
 	if got != string(want) {
 		t.Errorf("rendered /metrics does not match %s (run with -update to refresh it after a deliberate change)\n--- got ---\n%s\n--- want ---\n%s", goldenPath, got, string(want))
+	}
+}
+
+func TestBrokerMetricUnits(t *testing.T) {
+	t.Parallel()
+	store := NewStore(time.Minute)
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = meterProvider.Shutdown(context.Background()) })
+	if err := registerBrokerMetrics(meterProvider.Meter(otelMeterName), store); err != nil {
+		t.Fatalf("registerBrokerMetrics: %v", err)
+	}
+	store.SetConnected(true)
+	store.Update("$SYS/broker/uptime", "1")
+	store.Update("$SYS/broker/bytes/received", "2")
+	store.Update("$SYS/broker/clients/connected", "3")
+
+	var data metricdata.ResourceMetrics
+	if err := reader.Collect(t.Context(), &data); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	want := map[string]string{
+		"mosquitto_broker_uptime_seconds":       "s",
+		"mosquitto_broker_bytes_received_total": "By",
+		"mosquitto_broker_clients_connected":    "1",
+	}
+	for _, scope := range data.ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			if unit, ok := want[metric.Name]; ok {
+				if metric.Unit != unit {
+					t.Errorf("%s unit = %q, want %q", metric.Name, metric.Unit, unit)
+				}
+				delete(want, metric.Name)
+			}
+		}
+	}
+	if len(want) != 0 {
+		t.Errorf("metrics not collected: %v", want)
 	}
 }
 

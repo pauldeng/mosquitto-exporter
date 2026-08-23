@@ -35,17 +35,17 @@ type topicCase struct {
 var topicCases = []topicCase{
 	// --- Counters ---
 	{"bytes/received", "$SYS/broker/bytes/received", "123456",
-		Sample{Name: "mosquitto_broker_bytes_received_total", Kind: Counter, Value: 123456}},
+		Sample{Name: "mosquitto_broker_bytes_received_total", Kind: Counter, Unit: "By", Value: 123456}},
 	{"bytes/sent", "$SYS/broker/bytes/sent", "654321",
-		Sample{Name: "mosquitto_broker_bytes_sent_total", Kind: Counter, Value: 654321}},
+		Sample{Name: "mosquitto_broker_bytes_sent_total", Kind: Counter, Unit: "By", Value: 654321}},
 	{"messages/received", "$SYS/broker/messages/received", "10",
 		Sample{Name: "mosquitto_broker_messages_received_total", Kind: Counter, Value: 10}},
 	{"messages/sent", "$SYS/broker/messages/sent", "9",
 		Sample{Name: "mosquitto_broker_messages_sent_total", Kind: Counter, Value: 9}},
 	{"publish/bytes/received", "$SYS/broker/publish/bytes/received", "500",
-		Sample{Name: "mosquitto_broker_publish_bytes_received_total", Kind: Counter, Value: 500}},
+		Sample{Name: "mosquitto_broker_publish_bytes_received_total", Kind: Counter, Unit: "By", Value: 500}},
 	{"publish/bytes/sent", "$SYS/broker/publish/bytes/sent", "400",
-		Sample{Name: "mosquitto_broker_publish_bytes_sent_total", Kind: Counter, Value: 400}},
+		Sample{Name: "mosquitto_broker_publish_bytes_sent_total", Kind: Counter, Unit: "By", Value: 400}},
 	{"publish/messages/received", "$SYS/broker/publish/messages/received", "8",
 		Sample{Name: "mosquitto_broker_publish_messages_received_total", Kind: Counter, Value: 8}},
 	{"publish/messages/sent", "$SYS/broker/publish/messages/sent", "7",
@@ -79,7 +79,7 @@ var topicCases = []topicCase{
 	{"store/messages/count (duplicate of messages/stored)", "$SYS/broker/store/messages/count", "11",
 		Sample{Name: "mosquitto_broker_messages_stored", Kind: Gauge, Value: 11}},
 	{"store/messages/bytes", "$SYS/broker/store/messages/bytes", "2048",
-		Sample{Name: "mosquitto_broker_store_messages_bytes", Kind: Gauge, Value: 2048}},
+		Sample{Name: "mosquitto_broker_store_messages_bytes", Kind: Gauge, Unit: "By", Value: 2048}},
 	{"subscriptions/count", "$SYS/broker/subscriptions/count", "3",
 		Sample{Name: "mosquitto_broker_subscriptions", Kind: Gauge, Value: 3}},
 	{"shared_subscriptions/count", "$SYS/broker/shared_subscriptions/count", "1",
@@ -87,24 +87,24 @@ var topicCases = []topicCase{
 	{"retained messages/count (literal space in topic)", "$SYS/broker/retained messages/count", "0",
 		Sample{Name: "mosquitto_broker_retained_messages", Kind: Gauge, Value: 0}},
 	{"heap/current", "$SYS/broker/heap/current", "1048576",
-		Sample{Name: "mosquitto_broker_heap_current_bytes", Kind: Gauge, Value: 1048576}},
+		Sample{Name: "mosquitto_broker_heap_current_bytes", Kind: Gauge, Unit: "By", Value: 1048576}},
 	{"heap/maximum", "$SYS/broker/heap/maximum", "2097152",
-		Sample{Name: "mosquitto_broker_heap_maximum_bytes", Kind: Gauge, Value: 2097152}},
+		Sample{Name: "mosquitto_broker_heap_maximum_bytes", Kind: Gauge, Unit: "By", Value: 2097152}},
 	{"packet/out/count", "$SYS/broker/packet/out/count", "5",
 		Sample{Name: "mosquitto_broker_packet_out_count", Kind: Gauge, Value: 5}},
 	{"packet/out/bytes", "$SYS/broker/packet/out/bytes", "1024",
-		Sample{Name: "mosquitto_broker_packet_out_bytes", Kind: Gauge, Value: 1024}},
+		Sample{Name: "mosquitto_broker_packet_out_bytes", Kind: Gauge, Unit: "By", Value: 1024}},
 	// Fix (§3.4): was a Counter. Payload carries a trailing unit ("seconds").
 	{"uptime (fixed to Gauge)", "$SYS/broker/uptime", "12345 seconds",
-		Sample{Name: "mosquitto_broker_uptime_seconds", Kind: Gauge, Value: 12345}},
+		Sample{Name: "mosquitto_broker_uptime_seconds", Kind: Gauge, Unit: "s", Value: 12345}},
 
 	// --- load/connections: the one load/** series kept (§6.3) ---
 	{"load/connections/1min", "$SYS/broker/load/connections/1min", "0.50",
-		Sample{Name: "mosquitto_broker_load_connections", Kind: Gauge, Value: 0.50, Labels: map[string]string{"window": "1m"}}},
+		Sample{Name: "mosquitto_broker_load_connections", Kind: Gauge, Unit: "1/s", Value: 0.50, Labels: map[string]string{"window": "1m"}}},
 	{"load/connections/5min", "$SYS/broker/load/connections/5min", "0.75",
-		Sample{Name: "mosquitto_broker_load_connections", Kind: Gauge, Value: 0.75, Labels: map[string]string{"window": "5m"}}},
+		Sample{Name: "mosquitto_broker_load_connections", Kind: Gauge, Unit: "1/s", Value: 0.75, Labels: map[string]string{"window": "5m"}}},
 	{"load/connections/15min", "$SYS/broker/load/connections/15min", "1.00",
-		Sample{Name: "mosquitto_broker_load_connections", Kind: Gauge, Value: 1.00, Labels: map[string]string{"window": "15m"}}},
+		Sample{Name: "mosquitto_broker_load_connections", Kind: Gauge, Unit: "1/s", Value: 1.00, Labels: map[string]string{"window": "15m"}}},
 }
 
 // droppedLoadTopics are the 24 load/** series that are pure EWMAs of a
@@ -145,6 +145,13 @@ func TestResolve_knownTopics(t *testing.T) {
 			if got.Kind != tt.want.Kind {
 				t.Errorf("Resolve(%q, ...) Kind = %v, want %v", tt.topic, got.Kind, tt.want.Kind)
 			}
+			wantUnit := tt.want.Unit
+			if wantUnit == "" {
+				wantUnit = "1"
+			}
+			if got.Unit != wantUnit {
+				t.Errorf("Resolve(%q, ...) Unit = %q, want %q", tt.topic, got.Unit, wantUnit)
+			}
 			if got.Value != tt.want.Value {
 				t.Errorf("Resolve(%q, ...) Value = %v, want %v", tt.topic, got.Value, tt.want.Value)
 			}
@@ -152,6 +159,41 @@ func TestResolve_knownTopics(t *testing.T) {
 				t.Errorf("Resolve(%q, ...) Labels = %v, want %v", tt.topic, got.Labels, tt.want.Labels)
 			}
 		})
+	}
+}
+
+func TestInstruments(t *testing.T) {
+	t.Parallel()
+	want := make(map[string]Instrument)
+	for _, tt := range topicCases {
+		sample, reason := Resolve(tt.topic, tt.payload)
+		if reason != OK {
+			t.Fatalf("Resolve(%q, ...) reason = %v, want OK", tt.topic, reason)
+		}
+		want[sample.Name] = Instrument{Name: sample.Name, Kind: sample.Kind, Help: sample.Help, Unit: sample.Unit}
+	}
+	for _, input := range [][2]string{
+		{"$SYS/broker/version", "mosquitto version 2.1.2"},
+		{"$SYS/broker/connection/bridge/state", "1"},
+	} {
+		sample, reason := Resolve(input[0], input[1])
+		if reason != OK {
+			t.Fatalf("Resolve(%q, ...) reason = %v, want OK", input[0], reason)
+		}
+		want[sample.Name] = Instrument{Name: sample.Name, Kind: sample.Kind, Help: sample.Help, Unit: sample.Unit}
+	}
+
+	got := Instruments()
+	if len(got) != len(want) {
+		t.Fatalf("Instruments() has %d entries, want %d", len(got), len(want))
+	}
+	for i, instrument := range got {
+		if i > 0 && got[i-1].Name >= instrument.Name {
+			t.Fatalf("Instruments() is not sorted at %q", instrument.Name)
+		}
+		if !reflect.DeepEqual(instrument, want[instrument.Name]) {
+			t.Errorf("Instruments()[%q] = %+v, want %+v", instrument.Name, instrument, want[instrument.Name])
+		}
 	}
 }
 

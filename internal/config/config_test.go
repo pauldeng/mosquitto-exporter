@@ -58,6 +58,15 @@ func TestValidate(t *testing.T) {
 			otlpInterval: 60 * time.Second,
 			wantErr:      true,
 		},
+		{ //nolint:gosec // G101: malformed-input example proving credentials are rejected, not a real secret
+			name:         "otlp endpoint credentials rejected",
+			endpoint:     "tcp://127.0.0.1:1883",
+			sysInterval:  10 * time.Second,
+			otlpEndpoint: "https://user:secret@collector.example.com:4318",
+			otlpProtocol: "http",
+			otlpInterval: 60 * time.Second,
+			wantErr:      true,
+		},
 		{
 			name:         "otlp enabled with zero interval rejected",
 			endpoint:     "tcp://127.0.0.1:1883",
