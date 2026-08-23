@@ -109,3 +109,17 @@ jobs:
         run: docker run --rm -e MOSQUITTO_INSTANCE=test -v "$PWD/deploy/otelcol-contrib.yaml:/etc/otelcol.yaml:ro" otel/opentelemetry-collector-contrib:0.159.0@sha256:1f2c54a30e713fac6b3ae77a1ec84010c2007e29ced8ec666214fc2f6739c1cc validate --config=file:/etc/otelcol.yaml
       - name: validate Grafana Alloy config
         run: docker run --rm -e MOSQUITTO_INSTANCE=test -v "$PWD/deploy/alloy.river:/etc/alloy/config.alloy:ro" grafana/alloy:v1.18.1@sha256:0f4434c92b3e6cdac38bb129b344e1790c246f7b6e2eaffcc16a5fa363240e33 validate /etc/alloy/config.alloy
+
+  dashboard-alerts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: promtool check rules
+        run: docker run --rm --entrypoint promtool -v "$PWD/deploy/alerts/mosquitto.rules.yaml:/rules.yaml:ro" prom/prometheus:v3.9.1@sha256:1f0f50f06acaceb0f5670d2c8a658a599affe7b0d8e78b898c1035653849a702 check rules /rules.yaml
+      # No dashboard-linter dependency for one dashboard: a JSON parse plus a
+      # check that every mosquitto_*/process_* series the dashboard and the
+      # alert rules query actually exists in DESIGN.md §6 (see
+      # deploy/alerts/check_metric_names.py) catches the realistic failure -
+      # a typo'd metric name - without pulling in an extra tool for it.
+      - name: validate dashboard JSON and cross-check metric names
+        run: python3 deploy/alerts/check_metric_names.py

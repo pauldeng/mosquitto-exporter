@@ -1,6 +1,10 @@
 Mosquitto Exporter
 =============================
 Prometheus exporter for the [Mosquitto MQTT message broker](https://mosquitto.org/).
+It holds an MQTT subscription to the broker's `$SYS` tree and re-exports
+those values as Prometheus/OTLP metrics on `/metrics`.
+
+## Quick start
 
 A container image is built by `.goreleaser.yaml` on tagged releases, from
 the `Dockerfile` in this repo (distroless base, non-root):
@@ -9,9 +13,11 @@ docker run \
   -p 9234:9234 pauldeng/mosquitto-exporter:<tag> \
   --endpoint tcp://mosquitto:1883
 ```
+Then scrape `http://<host>:9234/metrics` from Prometheus. `mosquitto_up`
+reports connectivity to the broker; every other series is prefixed
+`mosquitto_broker_*`.
 
-Usage:
-======
+## Usage
 
 ```
 NAME:
@@ -100,12 +106,41 @@ once at startup - which value won, from whichever source - as a single
 `"effective configuration"` line. Credential values are omitted: username
 and password are represented only as `user_set`/`password_set` booleans.
 
+## Scope: what this exporter does not do
+
+- **No broker CPU or process memory.** `$SYS` publishes no CPU metric at
+  all, and its heap counters are not process memory:
+  `mosquitto_broker_heap_current_bytes`/`_maximum_bytes` are mosquitto's own
+  *tracked heap*, excluding stacks, allocator fragmentation, shared
+  libraries, and TLS buffers - they read lower than `ps`/`top` would. For
+  real broker CPU/RSS, run a separate exporter scraped into the same
+  Prometheus: `cAdvisor` for a containerized broker, `process-exporter` for
+  a systemd/bare-process one, joined to this exporter's series via a shared
+  `instance`/`broker` label in your scrape config, not by anything this
+  exporter adds.
+- **No message-latency metric, and none can be derived.** `$SYS` contains no
+  timing data at all - no histogram, percentile, or queue-wait time. The
+  closest proxies are `mosquitto_broker_packet_out_count`/`_bytes`
+  (delivery backlog) and `mosquitto_broker_publish_messages_dropped_total`
+  (backlog overflow); do not label a dashboard built on either "latency".
+  Measuring real latency requires a synthetic probe client, publisher/
+  subscriber-side instrumentation, or a broker plugin - all outside this
+  exporter.
+- **No tracing.** This exporter emits no spans and integrates with no
+  tracing backend (Tempo included). It is a `$SYS`-polling metrics exporter
+  with one incoming HTTP endpoint (`/metrics`); there is no request path
+  here worth tracing.
+- **No log tailing.** `mosquitto.log` shipping to Loki is configuration for
+  a collector you already run (`otelcol-contrib` or Grafana Alloy), not a
+  feature of this binary. See [`docs/LOGS.md`](docs/LOGS.md).
+
 ## Breaking changes since v0.7.7
 
 v1.0.0 renames every exported metric and changes a few flags. **See
 [`docs/MIGRATION.md`](docs/MIGRATION.md) for the full old->new metric mapping
 table, drop-in Prometheus recording rules for a transition window, and the
-complete upgrade checklist** - this section is only a summary:
+complete upgrade checklist**, or [`CHANGELOG.md`](CHANGELOG.md) for the full
+release history. This section is only a summary:
 
 - **Every Prometheus metric is renamed**, five wrong types are fixed
   (`clients_total`, `clients_maximum`, `uptime` were Counters and are now
@@ -138,6 +173,18 @@ complete upgrade checklist** - this section is only a summary:
   does not expire any other cached series by age - a healthy, unchanging
   value is reported for as long as the connection and heartbeat stay
   healthy.
+
+## Further reading
+
+- [`docs/MIGRATION.md`](docs/MIGRATION.md) - upgrading from v0.7.7: full
+  metric mapping, recording rules, upgrade checklist.
+- [`docs/OTEL.md`](docs/OTEL.md) - OTLP export details, the experimental
+  Prometheus exporter dependency, and the OTLP counter-reset limitation.
+- [`docs/LOGS.md`](docs/LOGS.md) - shipping `mosquitto.log` to Loki via
+  `otelcol-contrib` or Grafana Alloy (this exporter does not tail files).
+- [`mosquitto-exporter.example.yaml`](mosquitto-exporter.example.yaml) - every
+  YAML key, commented, with its default.
+- [`CHANGELOG.md`](CHANGELOG.md) - full release history.
 
 ## Development notes
 

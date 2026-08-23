@@ -1,0 +1,144 @@
+# Prometheus alerting rules for mosquitto-exporter (DESIGN.md §6/§7 Phase 7).
+#
+# Deliberately does NOT alert on absent() for any mosquitto_broker_* series:
+# per DESIGN.md §5.3, a disconnected exporter or a stalled $SYS heartbeat
+# makes every mosquitto_broker_* series go absent together. A per-series
+# absent() alert would fire ~28 times for one underlying cause and say
+# nothing an operator couldn't already get from MosquittoBrokerDown below.
+# Alert on mosquitto_up instead and let the rest of the tree go quiet.
+#
+# "job" label: adjust `up{job="mosquitto"}` in MosquittoExporterScrapeFailed
+# to match whatever job name your own Prometheus scrape config uses for this
+# exporter's target (docs/LOGS.md uses "mosquitto" as its example; this
+# exporter does not invent its own identity label - DESIGN.md §4.1).
+#
+# No rate()/increase() on a Gauge: clients_total, clients_maximum, and
+# uptime_seconds were fixed to Gauge in Phase 3 specifically so rate() over
+# them stays meaningless. This file uses delta()/deriv() for those instead.
+groups:
+  - name: mosquitto-exporter
+    rules:
+      - alert: MosquittoBrokerDown
+        expr: mosquitto_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Mosquitto broker unreachable or its $SYS heartbeat has stalled ({{ $labels.instance }})"
+          description: >-
+            mosquitto_up has read 0 for 2+ minutes: the exporter is either
+            disconnected from the broker, or connected but the
+            $SYS/broker/uptime heartbeat hasn't advanced within 3x
+            sys-interval (DESIGN.md §5.3). Every mosquitto_broker_* series is
+            absent right now by design - that is not a second incident.
+            Check the broker process and the MQTT network path from the
+            exporter's host.
+
+      - alert: MosquittoExporterScrapeFailed
+        expr: up{job="mosquitto"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus cannot scrape mosquitto-exporter ({{ $labels.instance }})"
+          description: >-
+            The /metrics endpoint hasn't answered a scrape in 2+ minutes.
+            Unlike MosquittoBrokerDown (broker connectivity), this means the
+            exporter process itself is down, unreachable, or crash-looping.
+            Restart or redeploy the exporter and check its logs.
+
+      - alert: MosquittoBrokerRestarted
+        expr: delta(mosquitto_broker_uptime_seconds[5m]) < 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mosquitto broker restarted ({{ $labels.instance }})"
+          description: >-
+            mosquitto_broker_uptime_seconds decreased, which only happens on
+            a broker restart. Every $SYS counter reset to zero at the same
+            time, so expect a one-window dip on rate()/increase() panels
+            across this dashboard. Confirm the restart was planned; if not,
+            check the broker's own logs for the cause.
+
+      - alert: MosquittoPublishMessagesDropping
+        expr: rate(mosquitto_broker_publish_messages_dropped_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Broker is dropping PUBLISH messages ({{ $labels.instance }})"
+          description: >-
+            The healthy value of this counter is a constant 0 (DESIGN.md
+            §5.3); a sustained non-zero rate over 5+ minutes means messages
+            are being discarded on inflight/queue limits. Look for a slow or
+            disconnected subscriber, an undersized max_queued_messages, or a
+            publisher storm.
+
+      - alert: MosquittoOutboundQueueGrowing
+        expr: deriv(mosquitto_broker_packet_out_count[10m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbound packet queue is trending up, not draining ({{ $labels.instance }})"
+          description: >-
+            mosquitto_broker_packet_out_count is a saturation proxy, not a
+            latency measurement - no latency metric exists or can exist for
+            this broker (DESIGN.md §4.2). A sustained upward trend over 10+
+            minutes means delivery is falling behind arrivals. Check
+            subscriber throughput and network capacity to clients before
+            this turns into MosquittoPublishMessagesDropping.
+
+      - alert: MosquittoUnknownTopicsDetected
+        expr: increase(mosquitto_exporter_unknown_topics_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Exporter is seeing $SYS topics it does not recognise ({{ $labels.instance }})"
+          description: >-
+            This counter reads a constant 0 on a broker version the exporter
+            fully knows (DESIGN.md §5.4); any increase is a real signal, not
+            background noise. Check the broker version against the
+            exporter's supported range, or look for a plugin publishing
+            extra $SYS topics.
+
+      - alert: MosquittoTrackedTopicCacheFull
+        expr: increase(mosquitto_exporter_dropped_topics_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Exporter's 1024-topic cache is full and dropping new topics ({{ $labels.instance }})"
+          description: >-
+            A new, otherwise-exportable $SYS topic arrived after the cache
+            hit its 1024-entry cap (DESIGN.md §5.4). Existing series are
+            unaffected, but this new one is silently lost. Usually caused by
+            a large number of bridge connections; investigate topic churn.
+
+      - alert: MosquittoInvalidPayloadsDetected
+        expr: increase(mosquitto_exporter_invalid_payloads_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Exporter cannot parse payloads on a known $SYS topic ({{ $labels.instance }})"
+          description: >-
+            A $SYS payload on a recognised topic failed to parse as a number
+            and was dropped rather than recorded as a false zero (DESIGN.md
+            C5). Usually indicates a broker version whose payload format has
+            drifted from what the exporter expects.
+
+      - alert: MosquittoBridgeDisconnected
+        expr: mosquitto_broker_bridge_connected == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Bridge {{ $labels.mosquitto_bridge_name }} is disconnected ({{ $labels.instance }})"
+          description: >-
+            This broker's connection to bridge "{{ $labels.mosquitto_bridge_name }}"
+            has been down for 5+ minutes. Messages destined for, or
+            originating from, that remote broker are not flowing. Check
+            network reachability and bridge credentials on both ends.
