@@ -6,6 +6,7 @@ package main
 // explicit http.Server timeouts (S4/S6).
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -13,7 +14,9 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -144,7 +147,7 @@ func TestBuildTLSConfig(t *testing.T) {
 func TestTLSHandshake_VerifiesByDefault(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 	addr := strings.TrimPrefix(srv.URL, "https://")
 
 	t.Run("nil config (paho's default when no TLS flags are set) rejects the self-signed cert", func(t *testing.T) {
@@ -281,5 +284,69 @@ func TestMetricsServesMosquittoUpZeroWithoutBroker(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "mosquitto_up 0") {
 		t.Errorf("/metrics does not contain %q; body:\n%s", "mosquitto_up 0", body)
+	}
+}
+
+//nolint:paralleltest // starts the process-level signal handler used by runServer
+func TestRunServerServesWhileBrokerIsDownAndShutsDown(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- newCommand().Run(ctx, []string{
+			appName,
+			"--endpoint", "tcp://127.0.0.1:1",
+			"--bind-address", addr,
+			"--reset-metrics=false",
+		})
+	}()
+
+	metricsURL := "http://" + addr + "/metrics"
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		resp, getErr := http.Get(metricsURL) //nolint:gosec // fixed local test URL
+		if getErr == nil {
+			body, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if readErr == nil && resp.StatusCode == http.StatusOK && strings.Contains(string(body), "mosquitto_up 0") {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("/metrics did not serve mosquitto_up 0 while broker was down")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	started := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runServer returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runServer did not stop within 5 seconds")
+	}
+	if elapsed := time.Since(started); elapsed >= 5*time.Second {
+		t.Fatalf("shutdown took %s, want under 5s", elapsed)
+	}
+}
+
+func TestServeVersion(t *testing.T) {
+	t.Parallel()
+	rec := httptest.NewRecorder()
+	serveVersion(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Mosquitto exporter") {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
 	}
 }

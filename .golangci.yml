@@ -6,17 +6,6 @@ run:
   build-tags:
     - integration
 
-# TEMPORARY - Phase 0 only. The repo has 9 real pre-existing findings in
-# main.go / handlers.go / mosquitto_counter.go (errcheck, gosec G402+G114,
-# staticcheck, modernize). Phase 0 is defined as "no behaviour change", so it
-# may not fix them, but a permanently-red gate cannot distinguish a new
-# regression from known debt.
-# Scoping to the pre-Phase-0 baseline keeps the gate meaningful for new code.
-# Phase 1 fixes those findings and DELETES this block - that is a Phase 1 exit
-# criterion, not an optional cleanup.
-issues:
-  new-from-rev: 7f922eb
-
 linters:
   default: standard
   enable:

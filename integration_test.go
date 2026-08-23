@@ -64,8 +64,8 @@ func freePort(t *testing.T) int {
 
 // startBroker starts the official Mosquitto 2.1.2 image (default config
 // already allows anonymous access on 1883) and returns its host port.
-// The broker is started FIRST because the exporter today does not serve
-// /metrics until it has connected (defect R1, DESIGN.md §3.3).
+// Starting the broker first keeps this smoke test focused on real $SYS data;
+// the broker-down serve-first path has its own lifecycle test.
 func startBroker(t *testing.T) int {
 	t.Helper()
 	brokerPort := freePort(t)

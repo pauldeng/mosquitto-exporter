@@ -17,17 +17,26 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v3"
 )
 
 const (
-	appName = "mosquitto-exporter"
+	appName            = "mosquitto-exporter"
+	mqttConnectTimeout = 3 * time.Second
 )
 
 func main() {
-	cmd := &cli.Command{
+	if err := newCommand().Run(context.Background(), os.Args); err != nil {
+		log.Error(err)
+		os.Exit(1)
+	}
+}
+
+func newCommand() *cli.Command {
+	return &cli.Command{
 		Name:    appName,
 		Version: versionString(),
 		Authors: []any{
@@ -109,11 +118,6 @@ func main() {
 				Sources: cli.EnvVars("RESET_METRICS"),
 			},
 		},
-	}
-
-	if err := cmd.Run(context.Background(), os.Args); err != nil {
-		log.Error(err)
-		os.Exit(1)
 	}
 }
 
@@ -206,13 +210,12 @@ func connectWithBackoff(ctx context.Context, client mqtt.Client, endpoint string
 	const (
 		initialBackoff = 1 * time.Second
 		maxBackoff     = 60 * time.Second
-		connectTimeout = 10 * time.Second
 	)
 
 	backoff := initialBackoff
 	for attempt := 1; ; attempt++ {
 		token := client.Connect()
-		gotResult := token.WaitTimeout(connectTimeout)
+		gotResult := token.WaitTimeout(mqttConnectTimeout)
 
 		if ctx.Err() != nil {
 			return
@@ -285,10 +288,17 @@ func runServer(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	store := NewStore()
-	prometheus.MustRegister(store)
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(
+		store,
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	)
 
 	opts := mqtt.NewClientOptions()
 	opts.SetCleanSession(true)
+	opts.SetConnectTimeout(mqttConnectTimeout)
+	opts.Dialer.Timeout = mqttConnectTimeout
 	opts.AddBroker(endpoint)
 
 	if clientID := cmd.String("client-id"); clientID != "" {
@@ -334,7 +344,7 @@ func runServer(ctx context.Context, cmd *cli.Command) error {
 	// S6: an explicit ServeMux instead of http.DefaultServeMux's global
 	// mutable state.
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
+	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/", serveVersion)
 
 	srv := newHTTPServer(cmd.String("bind-address"), mux)
@@ -352,7 +362,11 @@ func runServer(ctx context.Context, cmd *cli.Command) error {
 	// R1: connect to the broker in the background so /metrics is already
 	// serving (with mosquitto_up 0) while the broker is unreachable, instead
 	// of refusing connections until the broker answers.
-	go connectWithBackoff(ctx, client, endpoint)
+	connectDone := make(chan struct{})
+	go func() {
+		defer close(connectDone)
+		connectWithBackoff(ctx, client, endpoint)
+	}()
 
 	var runErr error
 	select {
@@ -364,8 +378,15 @@ func runServer(ctx context.Context, cmd *cli.Command) error {
 		stop()
 	}
 
-	if client.IsConnected() {
-		client.Disconnect(250)
+	// Disconnect also cancels Paho's connecting/reconnecting state. Checking
+	// IsConnected first would skip exactly the broker-down shutdown path.
+	client.Disconnect(250)
+	select {
+	case <-connectDone:
+	case <-time.After(mqttConnectTimeout + time.Second):
+		if runErr == nil {
+			runErr = errors.New("timed out stopping MQTT connection attempt")
+		}
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

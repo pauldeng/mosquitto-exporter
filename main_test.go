@@ -9,6 +9,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -20,15 +21,19 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.uber.org/goleak"
 )
 
 var updateGolden = flag.Bool("update", false, "update testdata golden files")
 
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
+
 // sharedStore is registered into the default Prometheus registry exactly
-// once for the whole test binary (mirroring production: runServer also
-// calls prometheus.MustRegister(store) exactly once). Store is an
-// "unchecked" Collector - Describe sends no descriptors, since its metric
-// set is determined by broker-controlled topics at runtime - and
+// once for tests that verify the legacy exposition. Production uses its own
+// registry. Store is an "unchecked" Collector - Describe sends no
+// descriptors, since its metric set is determined by broker-controlled topics at runtime - and
 // client_golang has no supported way to unregister an unchecked collector
 // (registry.go tracks them in a plain slice with no removal path), so tests
 // that need the default registry share this one instance and clear its
@@ -47,6 +52,7 @@ func resetStore(s *Store) {
 	s.samples = make(map[string]sample)
 	s.connected = false
 	s.invalidPayloads = 0
+	s.droppedTopics = 0
 }
 
 // TestParseTopic pins parseTopic's output for all 56 real Mosquitto 2.1.2
@@ -178,6 +184,15 @@ func TestParseValue(t *testing.T) {
 	}
 }
 
+func FuzzParsePayload(f *testing.F) {
+	for _, seed := range []string{"", "0", "-5.5", "1234 seconds", "mosquitto version 2.1.2"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(_ *testing.T, payload string) {
+		_, _ = parseValue(payload)
+	})
+}
+
 // renderStore registers s into a throwaway private registry, renders
 // /metrics from it, and returns the deterministic subset of the body
 // matching names. A private registry (not the default one) is fine here
@@ -268,6 +283,32 @@ mosquitto_up 0
 `
 		if got := renderStore(s, map[string]bool{"mosquitto_up": true}); got != want {
 			t.Errorf("got:\n%s\nwant:\n%s", got, want)
+		}
+	})
+
+	t.Run("invalid metric name is dropped without panicking", func(t *testing.T) {
+		t.Parallel()
+		s := NewStore()
+		s.Update("$SYS/", "1")
+
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		if len(s.samples) != 0 || s.droppedTopics != 1 {
+			t.Fatalf("samples=%d dropped=%d, want 0 and 1", len(s.samples), s.droppedTopics)
+		}
+	})
+
+	t.Run("topic cache is capped", func(t *testing.T) {
+		t.Parallel()
+		s := NewStore()
+		for i := 0; i <= maxTrackedTopics; i++ {
+			s.Update(fmt.Sprintf("$SYS/broker/test/%d", i), "1")
+		}
+
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		if len(s.samples) != maxTrackedTopics || s.droppedTopics != 1 {
+			t.Fatalf("samples=%d dropped=%d, want %d and 1", len(s.samples), s.droppedTopics, maxTrackedTopics)
 		}
 	})
 }

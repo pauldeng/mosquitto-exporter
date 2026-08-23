@@ -9,13 +9,13 @@ import (
 
 // sample is one cached $SYS value: its last known reading, the Prometheus
 // type it renders as, and when it was last updated. lastSeen is not read
-// anywhere yet - it exists so the bounded-eviction cache from DESIGN.md
-// §5.4 (a later phase) does not need a second migration to add it; Update
-// already needs a clock read to get here.
+// anywhere yet - it exists for the connection heartbeat and future
+// diagnostics described in DESIGN.md §5.3.
 type sample struct {
 	value    float64
 	kind     metricKind
 	lastSeen time.Time
+	desc     *prometheus.Desc
 }
 
 // Store is the single source of truth for every $SYS value the exporter has
@@ -37,10 +37,7 @@ type sample struct {
 //     registered anymore, so there is nothing left to collide.
 //   - S5: every previously-unseen topic used to permanently register a new
 //     Collector with the global registry. Now exactly one Collector (this
-//     Store) is ever registered, regardless of how many distinct topics the
-//     broker sends. The internal map can still grow with broker-controlled
-//     topics - that bound is deliberately deferred to the eviction scheme
-//     in DESIGN.md §5.4, not part of this fix.
+//     Store) is registered and its broker-controlled map is capped.
 //
 // Store is an "unchecked" prometheus.Collector: Describe sends no
 // descriptors, because the set of metrics it exports is determined at
@@ -85,7 +82,7 @@ func NewStore() *Store {
 		),
 		droppedDesc: prometheus.NewDesc(
 			"mosquitto_exporter_dropped_topics_total",
-			"Total number of $SYS topics not tracked because the sample map hit its bound.",
+			"Total number of $SYS topics not tracked because their metric name was invalid or the sample map hit its bound.",
 			nil, nil,
 		),
 	}
@@ -113,7 +110,13 @@ func (s *Store) Update(topic, payload string) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, known := s.samples[topic]; !known && len(s.samples) >= maxTrackedTopics {
+	if sm, known := s.samples[topic]; known {
+		sm.value = value
+		sm.lastSeen = time.Now()
+		s.samples[topic] = sm
+		return
+	}
+	if len(s.samples) >= maxTrackedTopics {
 		// Never evict a topic we already track: $SYS is change-gated, so a
 		// healthy-but-constant topic (publish_messages_dropped sitting at 0)
 		// can legitimately go hours without a republish. Dropping it would
@@ -121,7 +124,17 @@ func (s *Store) Update(topic, payload string) {
 		s.droppedTopics++
 		return
 	}
-	s.samples[topic] = sample{value: value, kind: kind, lastSeen: time.Now()}
+
+	valueType := prometheus.GaugeValue
+	if kind == kindCounter {
+		valueType = prometheus.CounterValue
+	}
+	desc := prometheus.NewDesc(parseTopic(topic), topic, nil, nil)
+	if _, err := prometheus.NewConstMetric(desc, valueType, value); err != nil {
+		s.droppedTopics++
+		return
+	}
+	s.samples[topic] = sample{value: value, kind: kind, lastSeen: time.Now(), desc: desc}
 }
 
 // SetConnected records the broker connection state. Called from the
@@ -162,12 +175,14 @@ func (s *Store) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(s.invalidDesc, prometheus.CounterValue, float64(s.invalidPayloads))
 	ch <- prometheus.MustNewConstMetric(s.droppedDesc, prometheus.CounterValue, float64(s.droppedTopics))
 
-	for topic, sm := range s.samples {
+	for _, sm := range s.samples {
 		valueType := prometheus.GaugeValue
 		if sm.kind == kindCounter {
 			valueType = prometheus.CounterValue
 		}
-		desc := prometheus.NewDesc(parseTopic(topic), topic, nil, nil)
-		ch <- prometheus.MustNewConstMetric(desc, valueType, sm.value)
+		metric, err := prometheus.NewConstMetric(sm.desc, valueType, sm.value)
+		if err == nil {
+			ch <- metric
+		}
 	}
 }

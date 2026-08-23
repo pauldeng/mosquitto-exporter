@@ -7,6 +7,7 @@ require (
 	github.com/prometheus/client_golang v1.23.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/urfave/cli/v3 v3.4.1
+	go.uber.org/goleak v1.3.0
 )
 
 require (
