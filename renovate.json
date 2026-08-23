@@ -1,5 +1,12 @@
 {
   "extends": [
-    "config:base"
+    "config:recommended"
+  ],
+  "packageRules": [
+    {
+      "description": "go.yaml.in/yaml/v4 is pinned to an RC (see DESIGN.md §9.11) - require manual review, never auto-merge.",
+      "matchPackageNames": ["go.yaml.in/yaml/v4"],
+      "automerge": false
+    }
   ]
 }

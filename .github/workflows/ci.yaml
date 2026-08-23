@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.25", "1.26", "1.27"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+      - run: go build -mod=readonly ./...
+      - run: go vet -mod=readonly ./...
+      - run: go test -mod=readonly -race -coverprofile=coverage.out ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 is REQUIRED - .golangci.yml uses issues.new-from-rev
+      # against the pre-Phase-0 baseline commit, which a shallow clone lacks.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: golang/govulncheck-action@v1
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # Docker-backed: the integration test itself starts the official
+      # eclipse-mosquitto image (ubuntu-latest ships Docker by default).
+      # -v + explicit -run so a skipped test (e.g. Docker unavailable) is
+      # visible in the log and fails the job instead of silently going green.
+      - name: integration smoke test
+        run: |
+          go test -mod=readonly -tags=integration -run TestIntegrationSmoke -v ./... 2>&1 | tee integration.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
+          if grep -q '^--- SKIP' integration.log; then
+            echo "::error::integration smoke test was skipped, not run - failing so this isn't reported as a pass"
+            exit 1
+          fi
+          grep -q '^--- PASS: TestIntegrationSmoke' integration.log
+        shell: bash
