@@ -91,6 +91,9 @@ func newCommand() *cli.Command {
 				Version:            versionString(),
 				InsecureSkipVerify: cmd.Bool("insecure-skip-verify"),
 				SysInterval:        cmd.Duration("sys-interval"),
+				OTLPEndpoint:       cmd.String("otlp-endpoint"),
+				OTLPProtocol:       cmd.String("otlp-protocol"),
+				OTLPInterval:       cmd.Duration("otlp-interval"),
 			})
 		},
 		Flags: []cli.Flag{
@@ -113,6 +116,23 @@ func newCommand() *cli.Command {
 				Usage:   "Sizes the $SYS/broker/uptime staleness-heartbeat window only (must be > 0): while connected, the broker is reported down if uptime has not advanced for 3x this duration. It does not expire individual cached series and should match the broker's own sys_interval",
 				Value:   10 * time.Second,
 				Sources: cli.EnvVars("MQTT_SYS_INTERVAL"),
+			},
+			&cli.StringFlag{
+				Name:    "otlp-endpoint",
+				Usage:   "OTLP receiver endpoint to push metrics to (e.g. localhost:4317 for grpc, http://localhost:4318 for http); empty disables OTLP export entirely, no exporter is built and no OTLP network egress happens. Prometheus scraping via /metrics is always on and unaffected",
+				Sources: cli.EnvVars("OTLP_ENDPOINT"),
+			},
+			&cli.StringFlag{
+				Name:    "otlp-protocol",
+				Usage:   "OTLP wire protocol to use when --otlp-endpoint is set: grpc or http",
+				Value:   "grpc",
+				Sources: cli.EnvVars("OTLP_PROTOCOL"),
+			},
+			&cli.DurationFlag{
+				Name:    "otlp-interval",
+				Usage:   "Push interval for OTLP metric export when --otlp-endpoint is set (must be > 0)",
+				Value:   60 * time.Second,
+				Sources: cli.EnvVars("OTLP_INTERVAL"),
 			},
 		},
 	}

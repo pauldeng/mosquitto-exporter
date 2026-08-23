@@ -8,6 +8,7 @@ package exporter
 // phase-by-phase defect IDs (C1-C6) referenced in comments below.
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net/http/httptest"
@@ -20,8 +21,11 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/pauldeng/mosquitto-exporter/internal/sys"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.uber.org/goleak"
 )
 
@@ -62,6 +66,12 @@ func resetStore(s *Store) {
 // /metrics from it, and returns the deterministic subset of the body
 // matching names. A private registry (not the default one) is fine here
 // since none of TestStore needs process_*/go_* alongside it.
+//
+// Since Phase 4 (DESIGN.md §7), Store.Collect only renders mosquitto_up and
+// the mosquitto_exporter_* self-metric counters - mosquitto_broker_* series
+// are rendered by the OTel instruments in otelmetrics.go instead, so tests
+// that need those must read Store.BrokerSnapshot directly (see findSample)
+// rather than going through renderStore.
 func renderStore(s *Store, names map[string]bool) string {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(s)
@@ -71,6 +81,20 @@ func renderStore(s *Store, names map[string]bool) string {
 	promhttp.HandlerFor(reg, promhttp.HandlerOpts{}).ServeHTTP(rec, req)
 
 	return filterMetricFamilies(rec.Body.String(), names)
+}
+
+// findSample returns the sys.Sample named name from samples, or fails the
+// test - a small helper for asserting against Store.BrokerSnapshot's return
+// value directly instead of scraping rendered Prometheus text.
+func findSample(t *testing.T, samples []sys.Sample, name string) sys.Sample {
+	t.Helper()
+	for _, s := range samples {
+		if s.Name == name {
+			return s
+		}
+	}
+	t.Fatalf("no sample named %s in %+v", name, samples)
+	return sys.Sample{}
 }
 
 // TestStore covers Store's behaviour directly: sys.Resolve wiring
@@ -87,21 +111,23 @@ func TestStore(t *testing.T) {
 		s.SetConnected(true)
 		s.Update("$SYS/broker/uptime", "5") // heartbeat: also renders as a gauge
 
-		// HELP text is owned by internal/sys, not pinned here - only TYPE and
-		// value lines are checked (metricLinesMatch strips HELP from both
-		// sides). See TestMetricsGolden for the byte-exact, sys-owned HELP
-		// text pinned via -update.
-		want := `# TYPE mosquitto_broker_bytes_received_total counter
-mosquitto_broker_bytes_received_total 1024
-# TYPE mosquitto_broker_clients_connected gauge
-mosquitto_broker_clients_connected 2
-# TYPE mosquitto_up gauge
-mosquitto_up 1
-`
-		names := map[string]bool{"mosquitto_broker_bytes_received_total": true, "mosquitto_broker_clients_connected": true, "mosquitto_up": true}
-		got := renderStore(s, names)
-		if !metricLinesMatch(got, want) {
-			t.Errorf("got:\n%s\nwant (TYPE/value only):\n%s", got, want)
+		// mosquitto_up is still Store's own self-metric (Collect).
+		got := renderStore(s, map[string]bool{"mosquitto_up": true})
+		if !metricLinesMatch(got, "# TYPE mosquitto_up gauge\nmosquitto_up 1\n") {
+			t.Errorf("got:\n%s\nwant mosquitto_up 1", got)
+		}
+
+		// Since Phase 4, mosquitto_broker_* values live in the cache exposed
+		// via BrokerSnapshot, not in Store's own Prometheus rendering.
+		up, samples := s.BrokerSnapshot()
+		if !up {
+			t.Fatal("expected up() to be true")
+		}
+		if v := findSample(t, samples, "mosquitto_broker_bytes_received_total"); v.Value != 1024 || v.Kind != sys.Counter {
+			t.Errorf("bytes_received_total = %+v, want value 1024, kind Counter", v)
+		}
+		if v := findSample(t, samples, "mosquitto_broker_clients_connected"); v.Value != 2 || v.Kind != sys.Gauge {
+			t.Errorf("clients_connected = %+v, want value 2, kind Gauge", v)
 		}
 	})
 
@@ -112,15 +138,19 @@ mosquitto_up 1
 		s.Update("$SYS/broker/bytes/received", "still garbage")
 		s.SetConnected(true)
 
-		got := renderStore(s, map[string]bool{
-			"mosquitto_exporter_invalid_payloads_total": true,
-			"mosquitto_broker_bytes_received_total":     true,
-		})
-		if strings.Contains(got, "mosquitto_broker_bytes_received_total") {
-			t.Errorf("a topic that never parsed must never produce a sample (C5); got:\n%s", got)
-		}
+		got := renderStore(s, map[string]bool{"mosquitto_exporter_invalid_payloads_total": true})
 		if !strings.Contains(got, "mosquitto_exporter_invalid_payloads_total 2") {
 			t.Errorf("want mosquitto_exporter_invalid_payloads_total 2; got:\n%s", got)
+		}
+
+		// White-box: check the cache directly rather than via BrokerSnapshot,
+		// which would trivially report nothing while down regardless of
+		// whether the topic was cached.
+		s.mu.RLock()
+		_, cached := s.samples["$SYS/broker/bytes/received"]
+		s.mu.RUnlock()
+		if cached {
+			t.Error("a topic that never parsed must never produce a cached sample (C5)")
 		}
 	})
 
@@ -171,12 +201,21 @@ mosquitto_up 1
 		s.Update("$SYS/broker/messages/stored", "41")
 		s.Update("$SYS/broker/store/messages/count", "42")
 
-		got := renderStore(s, map[string]bool{"mosquitto_broker_messages_stored": true})
-		if n := strings.Count(got, "# TYPE mosquitto_broker_messages_stored"); n != 1 {
-			t.Fatalf("mosquitto_broker_messages_stored rendered %d times, want exactly 1 despite two source topics; body:\n%s", n, got)
+		up, samples := s.BrokerSnapshot()
+		if !up {
+			t.Fatal("expected up() to be true")
 		}
-		if !strings.Contains(got, "mosquitto_broker_messages_stored 42") {
-			t.Errorf("collapsed alias did not retain the latest value; body:\n%s", got)
+		n := 0
+		for _, sm := range samples {
+			if sm.Name == "mosquitto_broker_messages_stored" {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("mosquitto_broker_messages_stored appears %d times, want exactly 1 despite two source topics; samples:\n%+v", n, samples)
+		}
+		if v := findSample(t, samples, "mosquitto_broker_messages_stored"); v.Value != 42 {
+			t.Errorf("collapsed alias did not retain the latest value; got %v, want 42", v.Value)
 		}
 		s.mu.RLock()
 		cached := len(s.samples)
@@ -194,9 +233,10 @@ mosquitto_up 1
 		s.Update("$SYS/broker/version", "mosquitto version 2.1.2")
 		s.Update("$SYS/broker/version", "mosquitto version 2.1.3")
 
-		got := renderStore(s, map[string]bool{"mosquitto_broker_info": true})
-		if !strings.Contains(got, `mosquitto_version="2.1.3"`) || strings.Contains(got, `mosquitto_version="2.1.2"`) {
-			t.Errorf("broker info retained a stale version label; body:\n%s", got)
+		_, samples := s.BrokerSnapshot()
+		info := findSample(t, samples, "mosquitto_broker_info")
+		if info.Labels["mosquitto_version"] != "2.1.3" {
+			t.Errorf("broker info retained a stale version label; got %+v", info)
 		}
 	})
 
@@ -208,16 +248,12 @@ mosquitto_up 1
 		s.Update("$SYS/broker/bytes/received", "1024")
 		s.SetConnected(false)
 
-		got := renderStore(s, map[string]bool{
-			"mosquitto_up":                          true,
-			"mosquitto_broker_bytes_received_total": true,
-			"mosquitto_broker_uptime_seconds":       true,
-		})
+		got := renderStore(s, map[string]bool{"mosquitto_up": true})
 		if !strings.Contains(got, "mosquitto_up 0") {
 			t.Errorf("want mosquitto_up 0; got:\n%s", got)
 		}
-		if strings.Contains(got, "mosquitto_broker_bytes_received_total") || strings.Contains(got, "mosquitto_broker_uptime_seconds") {
-			t.Errorf("disconnected must omit every mosquitto_broker_* series, not report it flat or zeroed; got:\n%s", got)
+		if up, samples := s.BrokerSnapshot(); up || samples != nil {
+			t.Errorf("disconnected must omit every mosquitto_broker_* series, not report it flat or zeroed; up=%v samples=%+v", up, samples)
 		}
 
 		// The value is still cached, not forgotten - it must reappear
@@ -234,14 +270,18 @@ mosquitto_up 1
 		// and a new session must prove liveness for itself.
 		s.Update("$SYS/broker/uptime", "2")
 		s.SetConnected(true)
-		got = renderStore(s, map[string]bool{"mosquitto_up": true, "mosquitto_broker_bytes_received_total": true})
-		if !strings.Contains(got, "mosquitto_up 0") || strings.Contains(got, "mosquitto_broker_bytes_received_total") {
-			t.Errorf("reconnect exposed cached broker data before a new heartbeat; got:\n%s", got)
+		got = renderStore(s, map[string]bool{"mosquitto_up": true})
+		if up, _ := s.BrokerSnapshot(); !strings.Contains(got, "mosquitto_up 0") || up {
+			t.Errorf("reconnect exposed cached broker data before a new heartbeat; got:\n%s, up=%v", got, up)
 		}
 		s.Update("$SYS/broker/uptime", "3")
-		got = renderStore(s, map[string]bool{"mosquitto_up": true, "mosquitto_broker_bytes_received_total": true})
-		if !strings.Contains(got, "mosquitto_up 1") || !strings.Contains(got, "mosquitto_broker_bytes_received_total 1024") {
-			t.Errorf("fresh heartbeat did not restore cached broker data; got:\n%s", got)
+		got = renderStore(s, map[string]bool{"mosquitto_up": true})
+		up, samples := s.BrokerSnapshot()
+		if !strings.Contains(got, "mosquitto_up 1") || !up {
+			t.Errorf("fresh heartbeat did not restore up state; got:\n%s, up=%v", got, up)
+		}
+		if v := findSample(t, samples, "mosquitto_broker_bytes_received_total"); v.Value != 1024 {
+			t.Errorf("fresh heartbeat did not restore cached broker data; got %v, want 1024", v.Value)
 		}
 	})
 
@@ -266,7 +306,7 @@ mosquitto_up 1
 		// An already-tracked topic must still update once the cache is full.
 		s.Update(trackedTopic, "2")
 		s.mu.RLock()
-		got := s.samples[trackedTopic].value
+		got := s.samples[trackedTopic].Value
 		droppedBefore := s.droppedTopics
 		s.mu.RUnlock()
 		if got != 2 {
@@ -376,9 +416,12 @@ func TestStore_UnchangingTopicKeepsReporting(t *testing.T) {
 		if !s.up() {
 			t.Fatal("heartbeat is fresh (just ticked); want up")
 		}
-		got := renderStore(s, map[string]bool{"mosquitto_broker_shared_subscriptions": true})
-		if !strings.Contains(got, "mosquitto_broker_shared_subscriptions 0") {
-			t.Errorf("an unchanging-but-healthy series must still be reported after 10x sys-interval; got:\n%s", got)
+		up, samples := s.BrokerSnapshot()
+		if !up {
+			t.Fatal("expected up() to be true")
+		}
+		if v := findSample(t, samples, "mosquitto_broker_shared_subscriptions"); v.Value != 0 {
+			t.Errorf("an unchanging-but-healthy series must still be reported after 10x sys-interval; got %v, want 0", v.Value)
 		}
 	})
 }
@@ -482,28 +525,54 @@ func filterMetricFamilies(body string, names map[string]bool) string {
 	return out.String()
 }
 
-// TestMetricsGolden renders /metrics from a fixed set of injected messages
-// and compares the deterministic mosquitto_-derived series against a golden
-// file. It also asserts (without pinning volatile values) that at least one
+// TestMetricsGolden builds the exact production pipeline (DESIGN.md §7
+// Phase 4) - a fresh Store and client_golang's process/Go collectors
+// (§6.4) alongside the OTel MeterProvider and Prometheus reader from
+// otelprom.go/otelmetrics.go, all in one registry, exactly as Run wires
+// them in server.go - feeds it a fixed set of injected messages, and
+// compares the deterministic mosquitto_-derived series against a golden
+// file. This is the byte-identity proof the engine swap exists to satisfy:
+// the golden file itself must never change (see testdata/metrics.golden).
+//
+// It also asserts (without pinning volatile values) that at least one
 // process_* and one go_* series is present, so their loss in a later phase
 // fails CI instead of shipping silently (DESIGN.md §6.4).
 //
-// Not parallel: shares sharedStore and the default Prometheus registry with
-// TestProcessUpdate_Race and BenchmarkProcessUpdate.
-//
-//nolint:paralleltest // shared global registry state, see comment above
+// Uses its own local Store and registry rather than sharedStore/the default
+// registry, so - unlike TestProcessUpdate_Race and BenchmarkProcessUpdate -
+// it shares no global state and is safe to run in parallel.
 func TestMetricsGolden(t *testing.T) {
-	resetStore(sharedStore)
-	t.Cleanup(func() { resetStore(sharedStore) })
+	t.Parallel()
 
-	sharedStore.SetConnected(true)
+	store := NewStore(10 * time.Second)
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(
+		store,
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	)
+	promReader, err := newPrometheusReader(registry)
+	if err != nil {
+		t.Fatalf("newPrometheusReader: %v", err)
+	}
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(promReader))
+	t.Cleanup(func() { _ = meterProvider.Shutdown(context.Background()) })
+	brokerMetrics := newBrokerMetrics(meterProvider.Meter(otelMeterName), store)
+
+	store.SetConnected(true)
 	for _, m := range goldenMessages {
-		sharedStore.Update(m.topic, m.payload)
+		sample, ok := store.Update(m.topic, m.payload)
+		if !ok {
+			continue
+		}
+		if err := brokerMetrics.Ensure(sample); err != nil {
+			t.Fatalf("brokerMetrics.Ensure(%s): %v", sample.Name, err)
+		}
 	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/metrics", nil)
-	promhttp.Handler().ServeHTTP(rec, req)
+	promhttp.HandlerFor(registry, promhttp.HandlerOpts{}).ServeHTTP(rec, req)
 	body := rec.Body.String()
 
 	if rec.Code != 200 {
@@ -547,10 +616,13 @@ func TestMetricsGolden(t *testing.T) {
 
 // TestProcessUpdate_Race proves C1 and C2 are fixed (DESIGN.md §3.1): a
 // feeder goroutine calling Store.Update concurrently with a scraper
-// rendering /metrics (which calls Store.Collect) and a connection-state
-// flapper calling Store.SetConnected - simulating paho's OnConnect /
-// OnConnectionLost callbacks in production. All three now go through the
-// same sync.RWMutex in store.go.
+// rendering /metrics (which calls Store.Collect) and reading
+// Store.BrokerSnapshot (which - since Phase 4 - is what actually ranges
+// over the samples map that C1/C2 were originally about; Collect itself no
+// longer touches it) and a connection-state flapper calling
+// Store.SetConnected - simulating paho's OnConnect / OnConnectionLost
+// callbacks in production. All three now go through the same sync.RWMutex
+// in store.go.
 //
 // Captured `go test -race -run TestProcessUpdate_Race` output from Phase 0,
 // before this fix, 2026-08-23 (trimmed to 2 of the 8 WARNING blocks plus the
@@ -641,8 +713,9 @@ func TestProcessUpdate_Race(t *testing.T) {
 		}
 	})
 
-	// Scraper: repeatedly renders /metrics, invoking Store.Collect
-	// concurrently with the feeder's Update calls.
+	// Scraper: repeatedly renders /metrics (Store.Collect) and reads
+	// BrokerSnapshot (which ranges over the samples map, the C1/C2 map
+	// itself), both concurrently with the feeder's Update calls.
 	wg.Go(func() {
 		for {
 			select {
@@ -652,6 +725,7 @@ func TestProcessUpdate_Race(t *testing.T) {
 				rec := httptest.NewRecorder()
 				req := httptest.NewRequest("GET", "/metrics", nil)
 				promhttp.Handler().ServeHTTP(rec, req)
+				sharedStore.BrokerSnapshot()
 			}
 		}
 	})

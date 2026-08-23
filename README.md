@@ -41,6 +41,9 @@ GLOBAL OPTIONS:
    --insecure-skip-verify            Disable TLS certificate verification of the broker (INSECURE - only for testing) [$MQTT_INSECURE_SKIP_VERIFY]
    --client-id string, -i string     Client id to be used to connect to the Mosquitto message broker [$MQTT_CLIENT_ID]
    --sys-interval duration           Sizes the $SYS/broker/uptime staleness-heartbeat window only (must be > 0): while connected, the broker is reported down if uptime has not advanced for 3x this duration. It does not expire individual cached series and should match the broker's own sys_interval (default: 10s) [$MQTT_SYS_INTERVAL]
+   --otlp-endpoint string            OTLP receiver endpoint to push metrics to (e.g. localhost:4317 for grpc, http://localhost:4318 for http); empty disables OTLP export entirely, no exporter is built and no OTLP network egress happens. Prometheus scraping via /metrics is always on and unaffected [$OTLP_ENDPOINT]
+   --otlp-protocol string            OTLP wire protocol to use when --otlp-endpoint is set: grpc or http (default: "grpc") [$OTLP_PROTOCOL]
+   --otlp-interval duration          Push interval for OTLP metric export when --otlp-endpoint is set (must be > 0) (default: 1m0s) [$OTLP_INTERVAL]
    --help, -h                        show help
    --version, -v                     print the version
 ```
@@ -49,6 +52,12 @@ GLOBAL OPTIONS:
 `VERSION` in the `Makefile` / `{{ .Tag }}` in `.goreleaser.yaml`). Plain
 `go build` uses the neutral value `dev`; release versions are never
 hand-maintained in source.
+
+OTLP metrics export (`--otlp-endpoint`/`--otlp-protocol`/`--otlp-interval`)
+is opt-in and off by default - Prometheus scraping via `/metrics` is
+unaffected either way. See [`docs/OTEL.md`](docs/OTEL.md) for a worked
+example, the OTel Prometheus exporter's experimental status, and the OTLP
+counter-reset limitation across broker restarts.
 
 ## Breaking changes since v0.7.7
 

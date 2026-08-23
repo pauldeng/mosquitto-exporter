@@ -280,6 +280,74 @@ func TestRunServerServesWhileBrokerIsDownAndShutsDown(t *testing.T) {
 	}
 }
 
+// TestRunServerWithOTLPEndpointConfigured proves the opt-in OTLP push reader
+// (DESIGN.md §7 Phase 4 item 5) wires into Run without blocking startup or
+// shutdown, even though nothing is listening at the configured endpoint: the
+// gRPC OTLP exporter dials lazily, so /metrics must still serve promptly and
+// the whole process must still stop within the same budget as the
+// OTLP-disabled case above.
+//
+//nolint:paralleltest // starts the process-level signal handler used by Run
+func TestRunServerWithOTLPEndpointConfigured(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, config.Config{
+			Endpoint:     "tcp://127.0.0.1:1",
+			BindAddress:  addr,
+			Version:      "test",
+			SysInterval:  10 * time.Second,
+			OTLPEndpoint: "127.0.0.1:1", // nothing listens here; must never block
+			OTLPProtocol: "grpc",
+			OTLPInterval: time.Minute,
+		})
+	}()
+
+	metricsURL := "http://" + addr + "/metrics"
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		resp, getErr := http.Get(metricsURL) //nolint:gosec // fixed local test URL
+		if getErr == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("/metrics did not serve while the OTLP endpoint was unreachable")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	started := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("Run did not stop within 8 seconds")
+	}
+	// The OTel MeterProvider shutdown against an unreachable OTLP endpoint is
+	// bounded to its own short budget (server.go's otelShutdownCtx) rather
+	// than blocking indefinitely, so total shutdown must still stay well
+	// under the previous HTTP-only budget's headroom.
+	if elapsed := time.Since(started); elapsed >= 8*time.Second {
+		t.Fatalf("shutdown took %s, want under 8s", elapsed)
+	}
+}
+
 func TestServeVersion(t *testing.T) {
 	t.Parallel()
 	rec := httptest.NewRecorder()

@@ -85,3 +85,41 @@ func TestSysIntervalFlag(t *testing.T) {
 		t.Errorf("--sys-interval default = %s, want 10s", found.Value)
 	}
 }
+
+// TestOTLPFlagDefaults pins DESIGN.md decision 10.6: OTLP export is opt-in
+// and off by default. An empty --otlp-endpoint default means no OTLP
+// exporter is ever constructed and no OTLP network egress happens,
+// regardless of --otlp-protocol/--otlp-interval's own defaults.
+func TestOTLPFlagDefaults(t *testing.T) {
+	t.Parallel()
+	var endpoint *cli.StringFlag
+	var protocol *cli.StringFlag
+	var interval *cli.DurationFlag
+	for _, flag := range newCommand().Flags {
+		switch f := flag.(type) {
+		case *cli.StringFlag:
+			switch f.Name {
+			case "otlp-endpoint":
+				endpoint = f
+			case "otlp-protocol":
+				protocol = f
+			}
+		case *cli.DurationFlag:
+			if f.Name == "otlp-interval" {
+				interval = f
+			}
+		}
+	}
+	if endpoint == nil || protocol == nil || interval == nil {
+		t.Fatal("--otlp-endpoint, --otlp-protocol, and --otlp-interval flags must all be defined")
+	}
+	if endpoint.Value != "" {
+		t.Errorf("--otlp-endpoint default = %q, want empty (opt-in, off by default)", endpoint.Value)
+	}
+	if protocol.Value != "grpc" {
+		t.Errorf("--otlp-protocol default = %q, want %q", protocol.Value, "grpc")
+	}
+	if interval.Value != 60*time.Second {
+		t.Errorf("--otlp-interval default = %s, want 60s", interval.Value)
+	}
+}

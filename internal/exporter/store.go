@@ -28,20 +28,22 @@ const uptimeTopic = "$SYS/broker/uptime"
 // still connected, before Store reports mosquitto_up 0 (DESIGN.md §5.3).
 const heartbeatMultiplier = 3
 
-// cachedSample is one resolved, exportable $SYS value: its last known
-// reading, the Prometheus type it renders as, and the Desc built for it once
-// at cache time (not rebuilt per scrape).
+// cachedSample is one resolved, exportable $SYS value: the resolved sample
+// itself (name/kind/help/labels/value), plus the Desc built for it once at
+// cache time - kept only to detect two topics aliasing the same underlying
+// series (see the dedup scan in Update), never rendered directly since
+// Phase 4 (DESIGN.md §7): mosquitto_broker_* series are now rendered
+// exclusively through the OTel instruments in otelmetrics.go, which read the
+// cache via BrokerSnapshot.
 type cachedSample struct {
-	value float64
-	kind  sys.Kind
-	desc  *prometheus.Desc
+	sys.Sample
+	desc *prometheus.Desc
 }
 
 // Store is the single source of truth for every exportable $SYS value the
-// exporter has seen, and the single Prometheus Collector that renders them.
-// It is normally keyed on the raw $SYS topic. Alias topics resolving to the
-// same name and labels update the first cached entry instead of creating a
-// duplicate series.
+// exporter has seen. It is normally keyed on the raw $SYS topic. Alias
+// topics resolving to the same name and labels update the first cached
+// entry instead of creating a duplicate series.
 //
 // Every resolved sample comes from sys.Resolve, which is also what decides
 // whether a topic is exported at all (DESIGN.md §5.4's static table replaces
@@ -57,12 +59,12 @@ type cachedSample struct {
 //     to a number; counted by mosquitto_exporter_invalid_payloads_total (C5:
 //     a parse failure must never look like a genuine zero reading).
 //
-// Store is an "unchecked" prometheus.Collector: Describe sends no
-// descriptors, because the set of metrics it exports is determined at
-// runtime by whatever topics the broker has sent. See the Collector
-// interface doc on client_golang/prometheus for why partially describing a
-// dynamic collector (some fixed Descs but not the per-topic ones) is not a
-// supported option - it's all-or-nothing.
+// Store is also an "unchecked" prometheus.Collector for its own self-metrics
+// only (mosquitto_up and the three mosquitto_exporter_* counters below):
+// Describe sends no descriptors, matching how client_golang expects a
+// dynamic collector to identify itself. mosquitto_broker_* series are not
+// part of that Collector output; see the cachedSample and BrokerSnapshot
+// docs above and below.
 type Store struct {
 	mu              sync.RWMutex
 	samples         map[string]cachedSample
@@ -111,7 +113,14 @@ func NewStore(sysInterval time.Duration) *Store {
 
 // Update resolves topic/payload through sys.Resolve and records the result.
 // Called from the MQTT handler goroutine.
-func (s *Store) Update(topic, payload string) {
+//
+// ok reports whether reason was sys.OK, in which case sample is the resolved
+// series - regardless of whether it was actually cached (a topic dropped for
+// being new at a full cache still resolved OK). The caller uses this to feed
+// brokerMetrics.Ensure (server.go), which declares the corresponding OTel
+// instrument the first time each metric name is seen (DESIGN.md §7 Phase 4);
+// Store itself stays unaware of OTel entirely.
+func (s *Store) Update(topic, payload string) (sample sys.Sample, ok bool) {
 	sample, reason := sys.Resolve(topic, payload)
 
 	s.mu.Lock()
@@ -122,13 +131,13 @@ func (s *Store) Update(topic, payload string) {
 		// Recognised and deliberately dropped (§6.3). Not counted: it is not
 		// a surprise, and counting it would make the unknown-topic counter
 		// rise forever on a healthy broker.
-		return
+		return sys.Sample{}, false
 	case sys.NotExported:
 		s.unknownTopics++
-		return
+		return sys.Sample{}, false
 	case sys.InvalidPayload:
 		s.invalidPayloads++
-		return
+		return sys.Sample{}, false
 	}
 
 	if topic == uptimeTopic && s.connected {
@@ -136,9 +145,9 @@ func (s *Store) Update(topic, payload string) {
 	}
 
 	if cached, known := s.samples[topic]; known && sample.Name != "mosquitto_broker_info" {
-		cached.value = sample.Value
+		cached.Value = sample.Value
 		s.samples[topic] = cached
-		return
+		return sample, true
 	}
 
 	valueType := prometheus.GaugeValue
@@ -148,14 +157,14 @@ func (s *Store) Update(topic, payload string) {
 	desc := prometheus.NewDesc(sample.Name, sample.Help, nil, sample.Labels)
 	if _, err := prometheus.NewConstMetric(desc, valueType, sample.Value); err != nil {
 		s.droppedTopics++
-		return
+		return sample, true
 	}
-	next := cachedSample{value: sample.Value, kind: sample.Kind, desc: desc}
+	next := cachedSample{Sample: sample, desc: desc}
 	if _, known := s.samples[topic]; known {
 		// Replace the whole sample, not just its value: info-metric labels can
 		// change after a broker upgrade.
 		s.samples[topic] = next
-		return
+		return sample, true
 	}
 
 	// Alias topics share a descriptor. Keep one cache entry and let the most
@@ -165,7 +174,7 @@ func (s *Store) Update(topic, payload string) {
 	for key, cached := range s.samples {
 		if cached.desc.String() == desc.String() {
 			s.samples[key] = next
-			return
+			return sample, true
 		}
 	}
 
@@ -175,9 +184,10 @@ func (s *Store) Update(topic, payload string) {
 		// can legitimately go hours without a republish. Dropping it would
 		// make the series vanish exactly when everything is fine.
 		s.droppedTopics++
-		return
+		return sample, true
 	}
 	s.samples[topic] = next
+	return sample, true
 }
 
 // SetConnected records the broker connection state. Called from the
@@ -210,10 +220,12 @@ func (s *Store) up() bool {
 // Describe intentionally sends nothing: see the Store doc comment above.
 func (s *Store) Describe(_ chan<- *prometheus.Desc) {}
 
-// Collect renders mosquitto_up, the exporter's own self-metric counters, and
-// - only while up() - every cached $SYS value. When down, every
-// mosquitto_broker_* series is omitted together rather than reported flat or
-// zeroed (DESIGN.md §5.3/§5.5): the absence itself is the honest signal.
+// Collect renders mosquitto_up and the exporter's own self-metric counters.
+// Since Phase 4 (DESIGN.md §7), mosquitto_broker_* series are rendered by
+// the OTel instruments in otelmetrics.go instead - see BrokerSnapshot -
+// which is what actually implements the §5.3/§5.5 "omit every broker series
+// together while down" behaviour today; Store.Collect itself no longer
+// touches s.samples.
 func (s *Store) Collect(ch chan<- prometheus.Metric) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -226,18 +238,29 @@ func (s *Store) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(s.invalidDesc, prometheus.CounterValue, float64(s.invalidPayloads))
 	ch <- prometheus.MustNewConstMetric(s.unknownDesc, prometheus.CounterValue, float64(s.unknownTopics))
 	ch <- prometheus.MustNewConstMetric(s.droppedDesc, prometheus.CounterValue, float64(s.droppedTopics))
+}
 
-	if up == 0 {
-		return
+// BrokerSnapshot is the OTel instrument set's only view into Store
+// (otelmetrics.go's brokerMetrics.observe callback): up reports the same
+// connection/heartbeat gate Collect uses for mosquitto_up, and samples is
+// every cached $SYS value at the instant up was computed - both read under
+// one lock so they describe the same instant (mirrors Collect's own
+// up-then-samples read; §5.8's accepted torn-read trade-off still applies
+// across the samples themselves).
+//
+// When up is false, samples is nil: the caller must omit every
+// mosquitto_broker_* series together rather than report them flat or
+// zeroed (DESIGN.md §5.3/§5.5) - the absence itself is the honest signal.
+func (s *Store) BrokerSnapshot() (up bool, samples []sys.Sample) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if !s.up() {
+		return false, nil
 	}
+	samples = make([]sys.Sample, 0, len(s.samples))
 	for _, sm := range s.samples {
-		valueType := prometheus.GaugeValue
-		if sm.kind == sys.Counter {
-			valueType = prometheus.CounterValue
-		}
-		metric, err := prometheus.NewConstMetric(sm.desc, valueType, sm.value)
-		if err == nil {
-			ch <- metric
-		}
+		samples = append(samples, sm.Sample)
 	}
+	return true, samples
 }

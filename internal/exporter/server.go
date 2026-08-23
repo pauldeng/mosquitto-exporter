@@ -20,10 +20,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
 const (
 	mqttConnectTimeout = 3 * time.Second
+
+	// otelMeterName identifies the one Meter this exporter ever creates.
+	// WithoutScopeInfo (otelprom.go) suppresses it from /metrics entirely, so
+	// its exact value has no effect on exported output - it exists only for
+	// anyone reading OTel-internal debug logs.
+	otelMeterName = "github.com/pauldeng/mosquitto-exporter"
 )
 
 // buildTLSConfig assembles the broker TLS configuration, or returns (nil,
@@ -164,6 +171,26 @@ func Run(ctx context.Context, cfg config.Config) error {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 
+	// One MeterProvider, one instrument set (DESIGN.md §5.2): the pull-based
+	// Prometheus reader always exists behind /metrics; the OTLP push reader
+	// is a second, independent reader on the same provider, added only when
+	// explicitly configured (§6.4/§7 Phase 4 - off by default, zero new
+	// egress otherwise).
+	promReader, err := newPrometheusReader(registry)
+	if err != nil {
+		return fmt.Errorf("setting up OTel metrics: %w", err)
+	}
+	meterProviderOpts := []sdkmetric.Option{sdkmetric.WithReader(promReader)}
+	if cfg.OTLPEndpoint != "" {
+		otlpReader, otlpErr := newOTLPReader(cfg)
+		if otlpErr != nil {
+			return fmt.Errorf("setting up OTLP metrics: %w", otlpErr)
+		}
+		meterProviderOpts = append(meterProviderOpts, sdkmetric.WithReader(otlpReader))
+	}
+	meterProvider := sdkmetric.NewMeterProvider(meterProviderOpts...)
+	broker := newBrokerMetrics(meterProvider.Meter(otelMeterName), store)
+
 	opts := mqtt.NewClientOptions()
 	opts.SetCleanSession(true)
 	opts.SetConnectTimeout(mqttConnectTimeout)
@@ -191,7 +218,16 @@ func Run(ctx context.Context, cfg config.Config) error {
 		store.SetConnected(true)
 		// subscribe on every (re)connect
 		token := client.Subscribe("$SYS/#", 0, func(_ mqtt.Client, msg mqtt.Message) {
-			store.Update(msg.Topic(), string(msg.Payload()))
+			sample, ok := store.Update(msg.Topic(), string(msg.Payload()))
+			if !ok {
+				return
+			}
+			// Declares the OTel instrument the first time this metric name is
+			// seen; a cheap no-op on every later message for the same name
+			// (otelmetrics.go). Store itself stays unaware of OTel entirely.
+			if ensureErr := broker.Ensure(sample); ensureErr != nil {
+				slog.Warn("declaring OTel instrument", "metric", sample.Name, "error", ensureErr)
+			}
 		})
 		if !token.WaitTimeout(10 * time.Second) {
 			slog.Error("timeout subscribing to topic", "topic", "$SYS/#")
@@ -253,6 +289,24 @@ func Run(ctx context.Context, cfg config.Config) error {
 			runErr = errors.New("timed out stopping MQTT connection attempt")
 		}
 	}
+
+	// Shutdown order (DESIGN.md §7 Phase 4): MQTT is already stopped above;
+	// MeterProvider.Shutdown performs its own final collect/export per
+	// reader before releasing resources (metric.PeriodicReader.Shutdown
+	// flushes pending telemetry internally, so a separate ForceFlush call
+	// would be redundant) - only then does HTTP stop serving, so a scrape
+	// can observe the exporter's true final state before the socket closes.
+	//
+	// Given its own short, independent budget rather than sharing the HTTP
+	// server's: an unreachable OTLP collector (opt-in, best-effort) must
+	// only ever cost a small fixed delay on shutdown, never eat into or
+	// block the HTTP server's own shutdown window. A failure here is logged,
+	// not fatal - this is telemetry export, not the exporter's core function.
+	otelShutdownCtx, otelCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	if err := meterProvider.Shutdown(otelShutdownCtx); err != nil {
+		slog.Warn("shutting down OTel meter provider", "error", err)
+	}
+	otelCancel()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

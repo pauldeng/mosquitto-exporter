@@ -24,6 +24,17 @@ type Config struct {
 	// not a per-topic expiry - every other cached series is reported
 	// regardless of age while connected.
 	SysInterval time.Duration
+	// OTLPEndpoint is the OTLP receiver address. Empty (the default) means
+	// OTLP export is disabled: no OTLP exporter is constructed and no OTLP
+	// network egress happens (DESIGN.md decision 10.6). Prometheus scraping
+	// via /metrics is unaffected either way.
+	OTLPEndpoint string
+	// OTLPProtocol selects the OTLP wire protocol, "grpc" or "http". Only
+	// meaningful when OTLPEndpoint is set.
+	OTLPProtocol string
+	// OTLPInterval is the push interval for the OTLP PeriodicReader. Only
+	// meaningful when OTLPEndpoint is set.
+	OTLPInterval time.Duration
 }
 
 // Validate rejects credentials embedded in the broker URL. Passwords are
@@ -38,6 +49,17 @@ func (c Config) Validate() error {
 	}
 	if c.SysInterval <= 0 {
 		return fmt.Errorf("sys-interval must be positive, got %s", c.SysInterval)
+	}
+	// An empty OTLPEndpoint means OTLP export is disabled; protocol and
+	// interval are then inert and must not fail validation regardless of
+	// their value (decision 10.6).
+	if c.OTLPEndpoint != "" {
+		if c.OTLPProtocol != "grpc" && c.OTLPProtocol != "http" {
+			return fmt.Errorf("otlp-protocol must be %q or %q, got %q", "grpc", "http", c.OTLPProtocol)
+		}
+		if c.OTLPInterval <= 0 {
+			return fmt.Errorf("otlp-interval must be positive, got %s", c.OTLPInterval)
+		}
 	}
 	return nil
 }
