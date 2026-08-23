@@ -206,7 +206,7 @@ func TestMetricsServesMosquittoUpZeroWithoutBroker(t *testing.T) {
 	// Own registry, not the default one: main_test.go registers sharedStore
 	// into the default registry at init, so a second Store there would emit
 	// mosquitto_up twice and Gather would fail the scrape with a 500.
-	store := NewStore()
+	store := NewStore(10 * time.Second)
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(store)
 
@@ -243,6 +243,7 @@ func TestRunServerServesWhileBrokerIsDownAndShutsDown(t *testing.T) {
 			Endpoint:    "tcp://127.0.0.1:1",
 			BindAddress: addr,
 			Version:     "test",
+			SysInterval: 10 * time.Second,
 		})
 	}()
 

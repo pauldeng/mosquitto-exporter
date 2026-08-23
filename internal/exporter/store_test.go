@@ -1,11 +1,11 @@
 package exporter
 
-// Phase 0 safety net, since updated for Phase 1: these tests pinned Phase
-// 0's behaviour (bugs included); Phase 1 replaced the global
+// Phase 0 safety net, since updated for Phase 1 and Phase 3: these tests
+// pinned Phase 0's behaviour (bugs included); Phase 1 replaced the global
 // counterMetrics/gaugeMetrics maps and per-topic dynamic registration with
-// the Store type (store.go), so the tests below now exercise Store instead.
-// See DESIGN.md §7 Phase 1 and §3.1 for the defect IDs (C1-C6) referenced in
-// comments below.
+// the Store type (store.go); Phase 3 rebuilt Store around sys.Resolve and
+// the static export table (DESIGN.md §5.3/§5.4/§6). See DESIGN.md §7 for the
+// phase-by-phase defect IDs (C1-C6) referenced in comments below.
 
 import (
 	"flag"
@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -38,7 +39,7 @@ func TestMain(m *testing.M) {
 // (registry.go tracks them in a plain slice with no removal path), so tests
 // that need the default registry share this one instance and clear its
 // state between runs instead of registering a fresh Store per test.
-var sharedStore = NewStore()
+var sharedStore = NewStore(10 * time.Second)
 
 func init() {
 	prometheus.MustRegister(sharedStore)
@@ -49,17 +50,13 @@ func init() {
 func resetStore(s *Store) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.samples = make(map[string]sample)
+	s.samples = make(map[string]cachedSample)
 	s.connected = false
+	s.lastUptime = time.Time{}
 	s.invalidPayloads = 0
+	s.unknownTopics = 0
 	s.droppedTopics = 0
 }
-
-// TestParseTopic pins parseTopic's output for all 56 real Mosquitto 2.1.2
-// $SYS topics. The inventory was extracted directly from src/sys_tree.c in
-// the eclipse-mosquitto v2.1.2 tag (99fa50f30e, the commit DESIGN.md cites):
-// 24 metrics[] entries + 3 deprecated aliases + 27 load/** EWMAs + version +
-// uptime = 56, matching DESIGN.md §4/§7.
 
 // renderStore registers s into a throwaway private registry, renders
 // /metrics from it, and returns the deterministic subset of the body
@@ -76,153 +73,355 @@ func renderStore(s *Store, names map[string]bool) string {
 	return filterMetricFamilies(rec.Body.String(), names)
 }
 
-// TestStore covers Store's behaviour directly: gauge vs counter
-// classification, ignored topics, invalid-payload counting (C5), and Reset.
+// TestStore covers Store's behaviour directly: sys.Resolve wiring
+// (OK/NotExported/InvalidPayload), the topic cache cap, and the connection
+// lifecycle (DESIGN.md §5.3/§5.4).
 func TestStore(t *testing.T) {
 	t.Parallel()
 
 	t.Run("gauge and counter classification, ignored topic, mosquitto_up", func(t *testing.T) {
 		t.Parallel()
-		s := NewStore()
-		s.Update("$SYS/broker/bytes/received", "1024")       // counter
-		s.Update("$SYS/broker/clients/connected", "2")       // gauge
-		s.Update("$SYS/broker/timestamp", "Thu Jan 01 1970") // ignored topic: no metric
+		s := NewStore(10 * time.Second)
+		s.Update("$SYS/broker/bytes/received", "1024") // counter
+		s.Update("$SYS/broker/clients/connected", "2") // gauge
 		s.SetConnected(true)
+		s.Update("$SYS/broker/uptime", "5") // heartbeat: also renders as a gauge
 
-		want := `# HELP broker_bytes_received $SYS/broker/bytes/received
-# TYPE broker_bytes_received counter
-broker_bytes_received 1024
-# HELP broker_clients_connected $SYS/broker/clients/connected
-# TYPE broker_clients_connected gauge
-broker_clients_connected 2
-# HELP mosquitto_up Whether the exporter is currently connected to the Mosquitto broker (1) or not (0).
+		// HELP text is owned by internal/sys, not pinned here - only TYPE and
+		// value lines are checked (metricLinesMatch strips HELP from both
+		// sides). See TestMetricsGolden for the byte-exact, sys-owned HELP
+		// text pinned via -update.
+		want := `# TYPE mosquitto_broker_bytes_received_total counter
+mosquitto_broker_bytes_received_total 1024
+# TYPE mosquitto_broker_clients_connected gauge
+mosquitto_broker_clients_connected 2
 # TYPE mosquitto_up gauge
 mosquitto_up 1
 `
-		names := map[string]bool{"broker_bytes_received": true, "broker_clients_connected": true, "mosquitto_up": true, "broker_timestamp": true}
-		if got := renderStore(s, names); got != want {
-			t.Errorf("got:\n%s\nwant:\n%s", got, want)
+		names := map[string]bool{"mosquitto_broker_bytes_received_total": true, "mosquitto_broker_clients_connected": true, "mosquitto_up": true}
+		got := renderStore(s, names)
+		if !metricLinesMatch(got, want) {
+			t.Errorf("got:\n%s\nwant (TYPE/value only):\n%s", got, want)
 		}
 	})
 
 	t.Run("invalid payload is counted, not recorded (C5)", func(t *testing.T) {
 		t.Parallel()
-		s := NewStore()
+		s := NewStore(10 * time.Second)
 		s.Update("$SYS/broker/bytes/received", "garbage")
 		s.Update("$SYS/broker/bytes/received", "still garbage")
-
-		want := `# HELP mosquitto_exporter_invalid_payloads_total Total number of $SYS payloads that could not be parsed as a number and were therefore not recorded.
-# TYPE mosquitto_exporter_invalid_payloads_total counter
-mosquitto_exporter_invalid_payloads_total 2
-`
-		// broker_bytes_received is filtered for too: both Updates failed to
-		// parse, so no sample was ever recorded for that topic (C5) - it must
-		// not appear in the output at all.
-		names := map[string]bool{"mosquitto_exporter_invalid_payloads_total": true, "broker_bytes_received": true}
-		if got := renderStore(s, names); got != want {
-			t.Errorf("got:\n%s\nwant:\n%s", got, want)
-		}
-	})
-
-	t.Run("Reset zeroes values but keeps the series (today's --reset-metrics behaviour)", func(t *testing.T) {
-		t.Parallel()
-		s := NewStore()
-		s.Update("$SYS/broker/bytes/received", "1024")
-		s.Reset()
-
-		want := `# HELP broker_bytes_received $SYS/broker/bytes/received
-# TYPE broker_bytes_received counter
-broker_bytes_received 0
-`
-		if got := renderStore(s, map[string]bool{"broker_bytes_received": true}); got != want {
-			t.Errorf("got:\n%s\nwant:\n%s", got, want)
-		}
-	})
-
-	t.Run("SetConnected(false) reports mosquitto_up 0", func(t *testing.T) {
-		t.Parallel()
-		s := NewStore()
 		s.SetConnected(true)
+
+		got := renderStore(s, map[string]bool{
+			"mosquitto_exporter_invalid_payloads_total": true,
+			"mosquitto_broker_bytes_received_total":     true,
+		})
+		if strings.Contains(got, "mosquitto_broker_bytes_received_total") {
+			t.Errorf("a topic that never parsed must never produce a sample (C5); got:\n%s", got)
+		}
+		if !strings.Contains(got, "mosquitto_exporter_invalid_payloads_total 2") {
+			t.Errorf("want mosquitto_exporter_invalid_payloads_total 2; got:\n%s", got)
+		}
+	})
+
+	t.Run("unknown topic is counted, not recorded", func(t *testing.T) {
+		t.Parallel()
+		s := NewStore(10 * time.Second)
+		// A topic never in the static export table (DESIGN.md §5.4): removed
+		// in real Mosquitto since 1.5 (§3.4) but historically special-cased.
+		s.Update("$SYS/broker/timestamp", "Thu Jan 01 1970")
+		s.Update("$SYS/broker/does/not/exist", "1")
+
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		if len(s.samples) != 0 {
+			t.Errorf("unknown topics must never be cached per-topic: len(samples)=%d", len(s.samples))
+		}
+		if s.unknownTopics != 2 {
+			t.Errorf("unknownTopics = %d, want 2", s.unknownTopics)
+		}
+	})
+
+	t.Run("dropped load/** series are not exported (DESIGN.md §6.3, decision 10.4)", func(t *testing.T) {
+		t.Parallel()
+		s := NewStore(10 * time.Second)
+		// Only load/connections is kept; the other 8 load/** families (24
+		// series across three windows) are dropped entirely.
+		s.Update("$SYS/broker/load/messages/received/1min", "5.0")
+
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		if len(s.samples) != 0 {
+			t.Errorf("a dropped load/** topic must not be cached: len(samples)=%d", len(s.samples))
+		}
+		// Deliberately dropped, so NOT counted as unknown: these arrive every
+		// sys_interval on a healthy broker, and counting them would make
+		// mosquitto_exporter_unknown_topics_total climb by 24 per tick,
+		// burying the one signal it exists to give (§5.4).
+		if s.unknownTopics != 0 {
+			t.Errorf("unknownTopics = %d after a deliberately dropped series, want 0", s.unknownTopics)
+		}
+	})
+
+	t.Run("aliased topics collapse to one series, not a duplicate (DESIGN.md §6.2, 2->1)", func(t *testing.T) {
+		t.Parallel()
+		s := NewStore(10 * time.Second)
+		s.SetConnected(true)
+		s.Update("$SYS/broker/uptime", "1")
+		s.Update("$SYS/broker/messages/stored", "42")
+		s.Update("$SYS/broker/store/messages/count", "42")
+
+		got := renderStore(s, map[string]bool{"mosquitto_broker_messages_stored": true})
+		if n := strings.Count(got, "# TYPE mosquitto_broker_messages_stored"); n != 1 {
+			t.Fatalf("mosquitto_broker_messages_stored rendered %d times, want exactly 1 despite two source topics; body:\n%s", n, got)
+		}
+	})
+
+	t.Run("SetConnected(false) reports mosquitto_up 0 and omits broker_* series (§5.3)", func(t *testing.T) {
+		t.Parallel()
+		s := NewStore(10 * time.Second)
+		s.SetConnected(true)
+		s.Update("$SYS/broker/uptime", "1")
+		s.Update("$SYS/broker/bytes/received", "1024")
 		s.SetConnected(false)
 
-		want := `# HELP mosquitto_up Whether the exporter is currently connected to the Mosquitto broker (1) or not (0).
-# TYPE mosquitto_up gauge
-mosquitto_up 0
-`
-		if got := renderStore(s, map[string]bool{"mosquitto_up": true}); got != want {
-			t.Errorf("got:\n%s\nwant:\n%s", got, want)
+		got := renderStore(s, map[string]bool{
+			"mosquitto_up":                          true,
+			"mosquitto_broker_bytes_received_total": true,
+			"mosquitto_broker_uptime_seconds":       true,
+		})
+		if !strings.Contains(got, "mosquitto_up 0") {
+			t.Errorf("want mosquitto_up 0; got:\n%s", got)
+		}
+		if strings.Contains(got, "mosquitto_broker_bytes_received_total") || strings.Contains(got, "mosquitto_broker_uptime_seconds") {
+			t.Errorf("disconnected must omit every mosquitto_broker_* series, not report it flat or zeroed; got:\n%s", got)
+		}
+
+		// The value is still cached, not forgotten - it must reappear
+		// unchanged once reconnected. That reconnection path is exercised by
+		// TestStore_HeartbeatStallRecovers below.
+		s.mu.RLock()
+		_, known := s.samples["$SYS/broker/bytes/received"]
+		s.mu.RUnlock()
+		if !known {
+			t.Error("Update while disconnected must still cache the value, not discard it")
 		}
 	})
 
-	t.Run("invalid metric name is dropped without panicking", func(t *testing.T) {
+	t.Run("cache is capped, but an already-tracked topic keeps updating (DESIGN.md §5.4)", func(t *testing.T) {
 		t.Parallel()
-		s := NewStore()
-		s.Update("$SYS/", "1")
+		s := NewStore(10 * time.Second)
 
+		const trackedTopic = "$SYS/broker/bytes/received" // real, exportable, Counter
+		s.Update(trackedTopic, "1")
+
+		// Pad the cache to the cap with synthetic entries via direct map
+		// access (white-box): internal/sys's real static export table has
+		// far fewer than maxTrackedTopics exportable topics, so there is no
+		// way to reach the cap through Update alone with real topic strings.
+		s.mu.Lock()
+		for i := len(s.samples); i < maxTrackedTopics; i++ {
+			key := fmt.Sprintf("synthetic/%d", i)
+			s.samples[key] = cachedSample{desc: prometheus.NewDesc(fmt.Sprintf("synthetic_%d", i), "synthetic", nil, nil)}
+		}
+		s.mu.Unlock()
+
+		// An already-tracked topic must still update once the cache is full.
+		s.Update(trackedTopic, "2")
+		s.mu.RLock()
+		got := s.samples[trackedTopic].value
+		droppedBefore := s.droppedTopics
+		s.mu.RUnlock()
+		if got != 2 {
+			t.Errorf("already-tracked topic did not update at cap: value=%v, want 2", got)
+		}
+
+		// A brand-new topic must be dropped and counted, never evicting an
+		// existing entry.
+		const newTopic = "$SYS/broker/messages/sent"
+		s.Update(newTopic, "5")
 		s.mu.RLock()
 		defer s.mu.RUnlock()
-		if len(s.samples) != 0 || s.droppedTopics != 1 {
-			t.Fatalf("samples=%d dropped=%d, want 0 and 1", len(s.samples), s.droppedTopics)
+		if _, ok := s.samples[newTopic]; ok {
+			t.Error("new topic was cached despite a full cache")
+		}
+		if s.droppedTopics != droppedBefore+1 {
+			t.Errorf("droppedTopics = %d, want %d", s.droppedTopics, droppedBefore+1)
+		}
+		if len(s.samples) != maxTrackedTopics {
+			t.Errorf("cache grew beyond cap: len=%d", len(s.samples))
 		}
 	})
+}
 
-	t.Run("topic cache is capped", func(t *testing.T) {
-		t.Parallel()
-		s := NewStore()
-		for i := 0; i <= maxTrackedTopics; i++ {
-			s.Update(fmt.Sprintf("$SYS/broker/test/%d", i), "1")
+// TestStore_HeartbeatStallReportsDown is the §5.3 stall-detection proof:
+// connected, but $SYS/broker/uptime has not advanced for 3x sys-interval, so
+// the broker's $SYS tree is treated as stalled and reported down. Uses
+// testing/synctest so the 3x sys-interval wait is instant and deterministic
+// instead of a real sleep.
+func TestStore_HeartbeatStallReportsDown(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		const sysInterval = 10 * time.Second
+		s := NewStore(sysInterval)
+		s.SetConnected(true)
+		s.Update("$SYS/broker/uptime", "1")
+
+		if !s.up() {
+			t.Fatal("expected up() immediately after a fresh uptime tick")
 		}
 
-		s.mu.RLock()
-		defer s.mu.RUnlock()
-		if len(s.samples) != maxTrackedTopics || s.droppedTopics != 1 {
-			t.Fatalf("samples=%d dropped=%d, want %d and 1", len(s.samples), s.droppedTopics, maxTrackedTopics)
+		time.Sleep(3*sysInterval + time.Second)
+		synctest.Wait()
+
+		if s.up() {
+			t.Error("uptime stalled for over 3x sys-interval while connected: want down, got up")
+		}
+		got := renderStore(s, map[string]bool{"mosquitto_up": true})
+		if !strings.Contains(got, "mosquitto_up 0") {
+			t.Errorf("want mosquitto_up 0 on heartbeat stall; got:\n%s", got)
+		}
+	})
+}
+
+// TestStore_HeartbeatStallRecovers proves the stall is not sticky: once
+// uptime ticks resume, up() recovers without needing SetConnected to
+// toggle - matching a broker whose $SYS tree pauses and resumes while the
+// TCP session never drops.
+func TestStore_HeartbeatStallRecovers(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		const sysInterval = 10 * time.Second
+		s := NewStore(sysInterval)
+		s.SetConnected(true)
+		s.Update("$SYS/broker/uptime", "1")
+
+		time.Sleep(3*sysInterval + time.Second)
+		synctest.Wait()
+		if s.up() {
+			t.Fatal("expected down after the stall window elapsed")
+		}
+
+		s.Update("$SYS/broker/uptime", "2")
+		if !s.up() {
+			t.Error("a fresh uptime tick must clear the stall immediately")
+		}
+	})
+}
+
+// TestStore_UnchangingTopicKeepsReporting is the DESIGN.md §5.3 regression
+// test explicitly required by the exporter's staleness contract: it fails
+// under a per-topic recency rule (an earlier, wrong draft) and passes under
+// connection-state gating. A healthy broker is change-gated - a
+// legitimately constant value (e.g. publish_messages_dropped sitting at 0)
+// may go many sys-intervals without a republish, and that must not make its
+// series vanish. Only the uptime heartbeat's own staleness matters.
+func TestStore_UnchangingTopicKeepsReporting(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		const sysInterval = 10 * time.Second
+		s := NewStore(sysInterval)
+		s.SetConnected(true)
+
+		// Set once, then never touched again - simulating a stable,
+		// change-gated $SYS value.
+		s.Update("$SYS/broker/shared_subscriptions/count", "0")
+
+		// The broker keeps ticking (uptime advances every tick) for 10x
+		// sys-interval, well past the 3x heartbeat window, while the other
+		// topic's value never changes.
+		for i := 1; i <= 10; i++ {
+			time.Sleep(sysInterval)
+			s.Update("$SYS/broker/uptime", strconv.Itoa(i*int(sysInterval.Seconds())))
+		}
+		synctest.Wait()
+
+		if !s.up() {
+			t.Fatal("heartbeat is fresh (just ticked); want up")
+		}
+		got := renderStore(s, map[string]bool{"mosquitto_broker_shared_subscriptions": true})
+		if !strings.Contains(got, "mosquitto_broker_shared_subscriptions 0") {
+			t.Errorf("an unchanging-but-healthy series must still be reported after 10x sys-interval; got:\n%s", got)
 		}
 	})
 }
 
 // goldenMessages is the fixed set of $SYS messages fed through
-// sharedStore.Update for TestMetricsGolden. It deliberately covers: the
-// counter path, the gauge path, both awkward real topic strings, and topics
-// in ignoreKeyMetrics (which must produce no metric at all).
+// sharedStore.Update for TestMetricsGolden. Chosen to cover every category
+// of Phase 3 change (DESIGN.md §6): an unchanged counter and gauge, all four
+// Counter<->Gauge reclassifications (§3.4), the messages_stored alias
+// collapse (2->1, §6.2), the load/connections window-label shape change
+// (§6.3), the new mosquitto_broker_info metric (version was previously
+// ignored entirely), a topic among the 24 dropped load/** series, and a
+// topic that no longer exists on a real broker (feeds
+// mosquitto_exporter_unknown_topics_total instead of silently vanishing).
 var goldenMessages = []struct {
 	topic   string
 	payload string
 }{
-	{"$SYS/broker/bytes/received", "1024"},
-	{"$SYS/broker/messages/sent", "50"},
-	// Pins the C-row bug from DESIGN.md §3.4: clients/total and uptime are
-	// Counters today; the broker documents them as a running total / gauge.
-	{"$SYS/broker/clients/total", "3"},
-	{"$SYS/broker/uptime", "12345"},
-	{"$SYS/broker/clients/connected", "2"},
-	{"$SYS/broker/retained messages/count", "7"},
-	{"$SYS/broker/shared_subscriptions/count", "0"},
-	{"$SYS/broker/load/connections/1min", "0.25"},
-	// Ignored topics: deprecated aliases and a topic that no longer exists on
-	// a real 2.1.2 broker (DESIGN.md §3.4) but is still in ignoreKeyMetrics.
-	// None of these three may produce a metric.
-	{"$SYS/broker/version", "mosquitto version 2.1.2"},
-	{"$SYS/broker/timestamp", "Thu Jan 01 1970"},
-	{"$SYS/broker/clients/active", "2"},
+	{"$SYS/broker/bytes/received", "1024"},             // counter, unchanged
+	{"$SYS/broker/messages/sent", "50"},                // counter, unchanged
+	{"$SYS/broker/clients/total", "3"},                 // was Counter -> Gauge (§3.4)
+	{"$SYS/broker/uptime", "12345"},                    // was Counter -> Gauge; also the heartbeat
+	{"$SYS/broker/clients/connected", "2"},             // gauge, unchanged
+	{"$SYS/broker/retained messages/count", "7"},       // gauge; awkward literal space in topic
+	{"$SYS/broker/shared_subscriptions/count", "0"},    // gauge, unchanged
+	{"$SYS/broker/load/connections/1min", "0.25"},      // shape change: window="1m" label
+	{"$SYS/broker/messages/stored", "42"},              // alias pair, half A
+	{"$SYS/broker/store/messages/count", "42"},         // alias pair, half B -> must collapse to 1 series
+	{"$SYS/broker/connections/socket/count", "9"},      // was Gauge -> Counter (§3.4)
+	{"$SYS/broker/clients/expired", "1"},               // was Gauge -> Counter (§3.4)
+	{"$SYS/broker/version", "mosquitto version 2.1.2"}, // new: mosquitto_broker_info (was ignored)
+	{"$SYS/broker/load/messages/received/1min", "5.0"}, // one of the 24 dropped load/** series
+	{"$SYS/broker/timestamp", "Thu Jan 01 1970"},       // no longer exists on a real broker (§3.4)
 }
 
 // goldenMetricNames lists the metric names goldenMessages (plus the fixed
-// mosquitto_up / mosquitto_exporter_invalid_payloads_total series every
-// Store exposes) are expected to produce - used to filter the rendered
-// /metrics body down to a deterministic subset for the golden-file
-// comparison.
+// mosquitto_up / mosquitto_exporter_* series every Store exposes) are
+// expected to produce - used to filter the rendered /metrics body down to a
+// deterministic subset for the golden-file comparison.
 var goldenMetricNames = map[string]bool{
-	"broker_bytes_received":                     true,
-	"broker_messages_sent":                      true,
-	"broker_clients_total":                      true,
-	"broker_uptime":                             true,
-	"broker_clients_connected":                  true,
-	"broker_retained_messages_count":            true,
-	"broker_shared_subscriptions_count":         true,
-	"broker_load_connections_1min":              true,
+	"mosquitto_broker_bytes_received_total":     true,
+	"mosquitto_broker_messages_sent_total":      true,
+	"mosquitto_broker_clients_total":            true,
+	"mosquitto_broker_uptime_seconds":           true,
+	"mosquitto_broker_clients_connected":        true,
+	"mosquitto_broker_retained_messages":        true,
+	"mosquitto_broker_shared_subscriptions":     true,
+	"mosquitto_broker_load_connections":         true,
+	"mosquitto_broker_messages_stored":          true,
+	"mosquitto_broker_connections_socket_total": true,
+	"mosquitto_broker_clients_expired_total":    true,
+	"mosquitto_broker_info":                     true,
 	"mosquitto_up":                              true,
 	"mosquitto_exporter_invalid_payloads_total": true,
+	"mosquitto_exporter_unknown_topics_total":   true,
+	"mosquitto_exporter_dropped_topics_total":   true,
+}
+
+// metricLinesMatch compares got against want ignoring HELP text (owned by
+// internal/sys, not pinned here) but requiring identical TYPE and value
+// lines in the same order.
+func metricLinesMatch(got, want string) bool {
+	filter := func(body string) []string {
+		var lines []string
+		for line := range strings.SplitSeq(body, "\n") {
+			if line != "" && !strings.HasPrefix(line, "# HELP") {
+				lines = append(lines, line)
+			}
+		}
+		return lines
+	}
+	g, w := filter(got), filter(want)
+	if len(g) != len(w) {
+		return false
+	}
+	for i := range g {
+		if g[i] != w[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // filterMetricFamilies keeps only the "# HELP name / # TYPE name / value..."
@@ -270,11 +469,23 @@ func TestMetricsGolden(t *testing.T) {
 	promhttp.Handler().ServeHTTP(rec, req)
 	body := rec.Body.String()
 
+	if rec.Code != 200 {
+		t.Fatalf("scrape status = %d, want 200 (body:\n%s)", rec.Code, body)
+	}
 	if !strings.Contains(body, "\nprocess_") && !strings.HasPrefix(body, "process_") {
 		t.Error("no process_* series in /metrics output - lost exporter self-metrics")
 	}
 	if !strings.Contains(body, "\ngo_") && !strings.HasPrefix(body, "go_") {
 		t.Error("no go_* series in /metrics output - lost exporter self-metrics")
+	}
+	// The 24 dropped load/** series (DESIGN.md §6.3, decision 10.4) must
+	// never appear, under any name derived from that topic.
+	if strings.Contains(body, "load_messages_received") {
+		t.Error("a dropped load/** topic produced a series; it must be silently uncounted (unknown_topics_total instead)")
+	}
+	// The alias pair must render as exactly one series (DESIGN.md §6.2).
+	if n := strings.Count(body, "# TYPE mosquitto_broker_messages_stored "); n != 1 {
+		t.Errorf("mosquitto_broker_messages_stored TYPE line appears %d times, want 1", n)
 	}
 
 	got := filterMetricFamilies(body, goldenMetricNames)
@@ -299,9 +510,10 @@ func TestMetricsGolden(t *testing.T) {
 
 // TestProcessUpdate_Race proves C1 and C2 are fixed (DESIGN.md §3.1): a
 // feeder goroutine calling Store.Update concurrently with a scraper
-// rendering /metrics (which calls Store.Collect) and a resetter calling
-// Store.Reset - simulating paho's OnConnectionLost goroutine in production.
-// All three now go through the same sync.RWMutex in store.go.
+// rendering /metrics (which calls Store.Collect) and a connection-state
+// flapper calling Store.SetConnected - simulating paho's OnConnect /
+// OnConnectionLost callbacks in production. All three now go through the
+// same sync.RWMutex in store.go.
 //
 // Captured `go test -race -run TestProcessUpdate_Race` output from Phase 0,
 // before this fix, 2026-08-23 (trimmed to 2 of the 8 WARNING blocks plus the
@@ -386,9 +598,7 @@ func TestProcessUpdate_Race(t *testing.T) {
 				return
 			default:
 				sharedStore.Update("$SYS/broker/bytes/received", "1")
-				// Bounded key space: distinct-key map writes are what this
-				// exercises; an unbounded one just exhausts RAM.
-				sharedStore.Update("$SYS/broker/dynamic/"+strconv.Itoa(i%64), "1")
+				sharedStore.Update("$SYS/broker/uptime", strconv.Itoa(i))
 				i++
 			}
 		}
@@ -409,15 +619,17 @@ func TestProcessUpdate_Race(t *testing.T) {
 		}
 	})
 
-	// Resetter: simulates paho's OnConnectionLost callback goroutine, which
-	// calls Store.Reset concurrently with the feeder's map writes.
+	// Flapper: simulates paho's OnConnect/OnConnectionLost callbacks flipping
+	// connection state concurrently with the feeder's map writes.
 	wg.Go(func() {
+		connected := false
 		for {
 			select {
 			case <-done:
 				return
 			default:
-				sharedStore.Reset()
+				connected = !connected
+				sharedStore.SetConnected(connected)
 			}
 		}
 	})
@@ -428,10 +640,10 @@ func TestProcessUpdate_Race(t *testing.T) {
 // BenchmarkProcessUpdate measures the steady-state hot path: an already-seen
 // topic receiving a new value. This is what every message after the first
 // hits. Per DESIGN.md §3.5 (P1), Phase 0's version still compiled a fresh
-// regexp on every single call via parseValue; Phase 1 hoists that regexp
-// (and parseTopic's replacer, P2) to package-level vars. Baseline numbers
-// recorded in the Phase 0 handoff report (3.8 µs/op, 37 allocs/op) are the
-// no-regression reference for gate G6.
+// regexp on every single call via parseValue; Phase 1 hoisted that regexp
+// (and parseTopic's replacer, P2) to package-level vars, now owned by
+// internal/sys. Baseline numbers recorded in the Phase 0 handoff report
+// (3.8 µs/op, 37 allocs/op) are the no-regression reference for gate G6.
 func BenchmarkProcessUpdate(b *testing.B) {
 	resetStore(sharedStore)
 	b.Cleanup(func() { resetStore(sharedStore) })
@@ -448,8 +660,8 @@ func BenchmarkProcessUpdate(b *testing.B) {
 	}
 
 	// Pre-warm outside the timed loop: seed every topic once so the
-	// benchmark measures only the "already seen" path (parseValue +
-	// classifyTopic + map lookup + mutex), not one-time map-growth cost.
+	// benchmark measures only the "already seen" path (sys.Resolve + map
+	// lookup + mutex), not one-time map-growth cost.
 	for _, topic := range topics {
 		sharedStore.Update(topic, "0")
 	}
@@ -459,5 +671,39 @@ func BenchmarkProcessUpdate(b *testing.B) {
 	for b.Loop() {
 		sharedStore.Update(topics[i%len(topics)], payloads[i%len(payloads)])
 		i++
+	}
+}
+
+// TestStore_ExcludedTopicsDoNotCountAsUnknown pins the distinction between
+// "deliberately dropped" and "unrecognised". Before this split, the 24
+// dropped load/** series fed mosquitto_exporter_unknown_topics_total, so on
+// a healthy broker it rose by 24 every sys_interval - permanently non-zero
+// and rising, which buries a genuinely new topic in the noise.
+func TestStore_ExcludedTopicsDoNotCountAsUnknown(t *testing.T) {
+	t.Parallel()
+	s := NewStore(10 * time.Second)
+
+	// All 8 dropped load families; recognised, deliberately not exported.
+	for _, topic := range []string{
+		"$SYS/broker/load/messages/received/1min",
+		"$SYS/broker/load/messages/sent/5min",
+		"$SYS/broker/load/publish/dropped/15min",
+		"$SYS/broker/load/publish/received/1min",
+		"$SYS/broker/load/publish/sent/5min",
+		"$SYS/broker/load/bytes/received/15min",
+		"$SYS/broker/load/bytes/sent/1min",
+		"$SYS/broker/load/sockets/5min",
+	} {
+		s.Update(topic, "1.5")
+	}
+	if got := s.unknownTopics; got != 0 {
+		t.Errorf("unknownTopics = %d after only excluded topics, want 0", got)
+	}
+
+	// A genuinely unrecognised topic must still be counted, or the signal is
+	// gone in the other direction.
+	s.Update("$SYS/broker/something/nobody/knows", "1")
+	if got := s.unknownTopics; got != 1 {
+		t.Errorf("unknownTopics = %d after one unknown topic, want 1", got)
 	}
 }

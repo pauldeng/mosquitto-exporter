@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/pauldeng/mosquitto-exporter/internal/config"
 	"github.com/pauldeng/mosquitto-exporter/internal/exporter"
@@ -89,7 +90,7 @@ func newCommand() *cli.Command {
 				ClientID:           cmd.String("client-id"),
 				Version:            versionString(),
 				InsecureSkipVerify: cmd.Bool("insecure-skip-verify"),
-				ResetMetrics:       cmd.Bool("reset-metrics"),
+				SysInterval:        cmd.Duration("sys-interval"),
 			})
 		},
 		Flags: []cli.Flag{
@@ -107,7 +108,12 @@ func newCommand() *cli.Command {
 			&cli.StringFlag{Name: "ca-cert", Usage: "Location of a PEM-encoded CA certificate used to verify the broker's TLS certificate", Sources: cli.EnvVars("MQTT_CA_CERT")},
 			&cli.BoolFlag{Name: "insecure-skip-verify", Usage: "Disable TLS certificate verification of the broker (INSECURE - only for testing)", Sources: cli.EnvVars("MQTT_INSECURE_SKIP_VERIFY")},
 			&cli.StringFlag{Name: "client-id", Aliases: []string{"i"}, Usage: "Client id to be used to connect to the Mosquitto message broker", Sources: cli.EnvVars("MQTT_CLIENT_ID")},
-			&cli.BoolFlag{Name: "reset-metrics", Aliases: []string{"r"}, Usage: "Reset metrics when losing connection to broker", Value: true, Sources: cli.EnvVars("RESET_METRICS")},
+			&cli.DurationFlag{
+				Name:    "sys-interval",
+				Usage:   "Sizes the $SYS/broker/uptime staleness-heartbeat window only (must be > 0): while connected, the broker is reported down if uptime has not advanced for 3x this duration. It does not expire individual cached series and should match the broker's own sys_interval",
+				Value:   10 * time.Second,
+				Sources: cli.EnvVars("MQTT_SYS_INTERVAL"),
+			},
 		},
 	}
 }

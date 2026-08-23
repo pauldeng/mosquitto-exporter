@@ -4,41 +4,58 @@ import (
 	"sync"
 	"time"
 
-	mosquittosys "github.com/pauldeng/mosquitto-exporter/internal/sys"
+	"github.com/pauldeng/mosquitto-exporter/internal/sys"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// sample is one cached $SYS value: its last known reading, the Prometheus
-// type it renders as, and when it was last updated. lastSeen is not read
-// anywhere yet - it exists for the connection heartbeat and future
-// diagnostics described in DESIGN.md §5.3.
-type sample struct {
-	value    float64
-	kind     mosquittosys.Kind
-	lastSeen time.Time
-	desc     *prometheus.Desc
+// maxTrackedTopics bounds the sample map against broker-controlled input.
+// internal/sys's static table has ~30-odd exportable metric families
+// (DESIGN.md §5.4/§6), so this is well over 30x headroom and no real
+// deployment can reach it; it exists as a backstop against a table bug or a
+// future broker version adding topics, not as a limit anyone should tune.
+//
+// Deliberately a const, not a flag: nobody has a legitimate reason to tune
+// it.
+const maxTrackedTopics = 1024
+
+// uptimeTopic is the one $SYS topic Mosquitto publishes unconditionally
+// every tick, never change-gated (DESIGN.md §4, §5.3). It is therefore the
+// liveness heartbeat: Store treats its own staleness, not any other topic's,
+// as proof the broker's $SYS tree has stalled.
+const uptimeTopic = "$SYS/broker/uptime"
+
+// heartbeatMultiplier is how many sys-intervals of uptime silence, while
+// still connected, before Store reports mosquitto_up 0 (DESIGN.md §5.3).
+const heartbeatMultiplier = 3
+
+// cachedSample is one resolved, exportable $SYS value: its last known
+// reading, the Prometheus type it renders as, and the Desc built for it once
+// at cache time (not rebuilt per scrape).
+type cachedSample struct {
+	value float64
+	kind  sys.Kind
+	desc  *prometheus.Desc
 }
 
-// Store is the single source of truth for every $SYS value the exporter has
-// seen, and the single Prometheus Collector that renders them. Replacing
-// the old per-topic dynamically-registered metrics (one prometheus.Gauge or
-// *MosquittoCounter created and prometheus.MustRegister'd per newly-seen
-// topic) with one mutex-guarded map plus one Collector fixes four defects
-// in a single change - see DESIGN.md §7 Phase 1 item 1 for why they are not
-// patched separately:
+// Store is the single source of truth for every exportable $SYS value the
+// exporter has seen, and the single Prometheus Collector that renders them.
+// It is keyed on the raw $SYS topic, not on the rendered metric name,
+// because several topics can resolve to the same metric name under
+// different label values (e.g. per-bridge `mosquitto_broker_bridge_connected`).
 //
-//   - C1: MosquittoCounter's hand-rolled counter.value was a plain float64
-//     written by the MQTT goroutine and read by the scrape goroutine.
-//   - C2: counterMetrics/gaugeMetrics were plain maps written by the MQTT
-//     goroutine and ranged over by resetMetrics() on the reconnect
-//     goroutine - a concurrent map read/write, which is a fatal crash, not
-//     merely a race.
-//   - C4: prometheus.MustRegister panicked the first time two different
-//     $SYS topics produced the same metric name. Nothing is dynamically
-//     registered anymore, so there is nothing left to collide.
-//   - S5: every previously-unseen topic used to permanently register a new
-//     Collector with the global registry. Now exactly one Collector (this
-//     Store) is registered and its broker-controlled map is capped.
+// Every resolved sample comes from sys.Resolve, which is also what decides
+// whether a topic is exported at all (DESIGN.md §5.4's static table replaces
+// the old "any $SYS topic auto-registers a metric" behaviour):
+//
+//   - sys.OK: the value is cached (or updates an existing cache entry).
+//   - sys.Excluded: recognised but deliberately not exported (the 24 dropped
+//     load/** series); silently ignored, deliberately not counted.
+//   - sys.NotExported: the topic is not in the static table; counted by
+//     mosquitto_exporter_unknown_topics_total, never cached per-topic, so an
+//     attacker flooding unknown $SYS topics cannot grow memory.
+//   - sys.InvalidPayload: the topic is known but the payload did not parse
+//     to a number; counted by mosquitto_exporter_invalid_payloads_total (C5:
+//     a parse failure must never look like a genuine zero reading).
 //
 // Store is an "unchecked" prometheus.Collector: Describe sends no
 // descriptors, because the set of metrics it exports is determined at
@@ -46,34 +63,32 @@ type sample struct {
 // interface doc on client_golang/prometheus for why partially describing a
 // dynamic collector (some fixed Descs but not the per-topic ones) is not a
 // supported option - it's all-or-nothing.
-// maxTrackedTopics bounds the sample map against broker-controlled input.
-// A real 2.1.2 broker publishes 56 $SYS topics, so this is ~18x headroom and
-// no real deployment can reach it; it exists so a misbehaving or hostile
-// publisher cannot grow the map without limit (S5's storage half).
-//
-// Deliberately a const, not a flag: nobody has a legitimate reason to tune
-// it, and Phase 3's static topic table replaces this with an exact allowlist.
-const maxTrackedTopics = 1024
-
 type Store struct {
 	mu              sync.RWMutex
-	samples         map[string]sample
+	samples         map[string]cachedSample
 	connected       bool
+	lastUptime      time.Time // last time uptimeTopic was resolved OK; zero if never
+	sysInterval     time.Duration
 	invalidPayloads uint64
+	unknownTopics   uint64
 	droppedTopics   uint64
 
 	upDesc      *prometheus.Desc
 	invalidDesc *prometheus.Desc
+	unknownDesc *prometheus.Desc
 	droppedDesc *prometheus.Desc
 }
 
-// NewStore returns an empty, ready-to-use Store.
-func NewStore() *Store {
+// NewStore returns an empty, ready-to-use Store. sysInterval sizes the
+// uptime heartbeat window only (DESIGN.md §5.3) - it must be positive;
+// config.Config.Validate enforces that before this is called.
+func NewStore(sysInterval time.Duration) *Store {
 	return &Store{
-		samples: make(map[string]sample),
+		samples:     make(map[string]cachedSample),
+		sysInterval: sysInterval,
 		upDesc: prometheus.NewDesc(
 			"mosquitto_up",
-			"Whether the exporter is currently connected to the Mosquitto broker (1) or not (0).",
+			"Whether the exporter is currently connected to the Mosquitto broker and its $SYS tree is fresh (1) or not (0).",
 			nil, nil,
 		),
 		invalidDesc: prometheus.NewDesc(
@@ -81,40 +96,48 @@ func NewStore() *Store {
 			"Total number of $SYS payloads that could not be parsed as a number and were therefore not recorded.",
 			nil, nil,
 		),
+		unknownDesc: prometheus.NewDesc(
+			"mosquitto_exporter_unknown_topics_total",
+			"Total number of $SYS topics received that are not in the exporter's static export table and were therefore not recorded.",
+			nil, nil,
+		),
 		droppedDesc: prometheus.NewDesc(
 			"mosquitto_exporter_dropped_topics_total",
-			"Total number of $SYS topics not tracked because their metric name was invalid or the sample map hit its bound.",
+			"Total number of new, otherwise-exportable $SYS topics dropped because the tracked-topic cache was full.",
 			nil, nil,
 		),
 	}
 }
 
-// Update records topic's value. Called from the MQTT handler goroutine.
-//
-// Ignored topics (deprecated aliases, static build-time strings) produce no
-// sample, exactly as before. A payload that does not parse to a number also
-// produces no sample - it is counted instead (C5: a parse failure must
-// never look like a genuine zero reading).
+// Update resolves topic/payload through sys.Resolve and records the result.
+// Called from the MQTT handler goroutine.
 func (s *Store) Update(topic, payload string) {
-	kind, ok := mosquittosys.ClassifyTopic(topic)
-	if !ok {
-		return
-	}
-
-	value, ok := mosquittosys.ParseValue(payload)
-	if !ok {
-		s.mu.Lock()
-		s.invalidPayloads++
-		s.mu.Unlock()
-		return
-	}
+	sample, reason := sys.Resolve(topic, payload)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if sm, known := s.samples[topic]; known {
-		sm.value = value
-		sm.lastSeen = time.Now()
-		s.samples[topic] = sm
+
+	switch reason {
+	case sys.Excluded:
+		// Recognised and deliberately dropped (§6.3). Not counted: it is not
+		// a surprise, and counting it would make the unknown-topic counter
+		// rise forever on a healthy broker.
+		return
+	case sys.NotExported:
+		s.unknownTopics++
+		return
+	case sys.InvalidPayload:
+		s.invalidPayloads++
+		return
+	}
+
+	if topic == uptimeTopic {
+		s.lastUptime = time.Now()
+	}
+
+	if cached, known := s.samples[topic]; known {
+		cached.value = sample.Value
+		s.samples[topic] = cached
 		return
 	}
 	if len(s.samples) >= maxTrackedTopics {
@@ -127,58 +150,79 @@ func (s *Store) Update(topic, payload string) {
 	}
 
 	valueType := prometheus.GaugeValue
-	if kind == mosquittosys.Counter {
+	if sample.Kind == sys.Counter {
 		valueType = prometheus.CounterValue
 	}
-	desc := prometheus.NewDesc(mosquittosys.TopicName(topic), topic, nil, nil)
-	if _, err := prometheus.NewConstMetric(desc, valueType, value); err != nil {
+	desc := prometheus.NewDesc(sample.Name, sample.Help, nil, sample.Labels)
+	if _, err := prometheus.NewConstMetric(desc, valueType, sample.Value); err != nil {
 		s.droppedTopics++
 		return
 	}
-	s.samples[topic] = sample{value: value, kind: kind, lastSeen: time.Now(), desc: desc}
+	s.samples[topic] = cachedSample{value: sample.Value, kind: sample.Kind, desc: desc}
 }
 
 // SetConnected records the broker connection state. Called from the
-// lifecycle goroutine; drives the mosquitto_up gauge.
+// lifecycle goroutine; drives the mosquitto_up gauge together with the
+// uptime heartbeat.
 func (s *Store) SetConnected(v bool) {
 	s.mu.Lock()
 	s.connected = v
 	s.mu.Unlock()
 }
 
-// Reset zeroes every cached value without forgetting which topics have been
-// seen, preserving today's --reset-metrics behaviour. That flag is a
-// breaking change to remove (it fabricates counter resets on every broker
-// flap - DESIGN.md §5.5) and belongs in the breaking release, not Phase 1.
-func (s *Store) Reset() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for topic, sm := range s.samples {
-		sm.value = 0
-		s.samples[topic] = sm
+// up reports whether the exporter should claim liveness: connected, and the
+// $SYS tree has produced an uptime tick within the heartbeat window
+// (DESIGN.md §5.3). Callers must hold at least a read lock.
+func (s *Store) up() bool {
+	if !s.connected {
+		return false
 	}
+	if s.lastUptime.IsZero() {
+		return false
+	}
+	return time.Since(s.lastUptime) < heartbeatMultiplier*s.sysInterval
 }
 
 // Describe intentionally sends nothing: see the Store doc comment above.
 func (s *Store) Describe(_ chan<- *prometheus.Desc) {}
 
-// Collect renders mosquitto_up, the invalid-payload counter, and every
-// cached $SYS value as const metrics.
+// Collect renders mosquitto_up, the exporter's own self-metric counters, and
+// - only while up() - every cached $SYS value. When down, every
+// mosquitto_broker_* series is omitted together rather than reported flat or
+// zeroed (DESIGN.md §5.3/§5.5): the absence itself is the honest signal.
 func (s *Store) Collect(ch chan<- prometheus.Metric) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	up := 0.0
-	if s.connected {
+	if s.up() {
 		up = 1.0
 	}
 	ch <- prometheus.MustNewConstMetric(s.upDesc, prometheus.GaugeValue, up)
 	ch <- prometheus.MustNewConstMetric(s.invalidDesc, prometheus.CounterValue, float64(s.invalidPayloads))
+	ch <- prometheus.MustNewConstMetric(s.unknownDesc, prometheus.CounterValue, float64(s.unknownTopics))
 	ch <- prometheus.MustNewConstMetric(s.droppedDesc, prometheus.CounterValue, float64(s.droppedTopics))
 
+	if up == 0 {
+		return
+	}
+	// Two different $SYS topics can resolve to the same exported series: a
+	// deprecated alias (e.g. clients/active -> mosquitto_broker_clients_connected)
+	// or a duplicate (messages/stored + store/messages/count, DESIGN.md
+	// §6.2/§6.3, "collapsed 2->1"). Both stay cached under their own topic
+	// key per the "never evict a known topic" rule, but must render as one
+	// series here - Prometheus fails the whole scrape if the same metric
+	// name+labels is collected twice in one Collect call.
+	seen := make(map[string]bool, len(s.samples))
 	for _, sm := range s.samples {
+		key := sm.desc.String()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
 		valueType := prometheus.GaugeValue
-		if sm.kind == mosquittosys.Counter {
+		if sm.kind == sys.Counter {
 			valueType = prometheus.CounterValue
 		}
 		metric, err := prometheus.NewConstMetric(sm.desc, valueType, sm.value)

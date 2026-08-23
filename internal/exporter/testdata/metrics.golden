@@ -1,30 +1,48 @@
-# HELP broker_bytes_received $SYS/broker/bytes/received
-# TYPE broker_bytes_received counter
-broker_bytes_received 1024
-# HELP broker_clients_connected $SYS/broker/clients/connected
-# TYPE broker_clients_connected gauge
-broker_clients_connected 2
-# HELP broker_clients_total $SYS/broker/clients/total
-# TYPE broker_clients_total counter
-broker_clients_total 3
-# HELP broker_load_connections_1min $SYS/broker/load/connections/1min
-# TYPE broker_load_connections_1min gauge
-broker_load_connections_1min 0.25
-# HELP broker_messages_sent $SYS/broker/messages/sent
-# TYPE broker_messages_sent counter
-broker_messages_sent 50
-# HELP broker_retained_messages_count $SYS/broker/retained messages/count
-# TYPE broker_retained_messages_count gauge
-broker_retained_messages_count 7
-# HELP broker_shared_subscriptions_count $SYS/broker/shared_subscriptions/count
-# TYPE broker_shared_subscriptions_count gauge
-broker_shared_subscriptions_count 0
-# HELP broker_uptime $SYS/broker/uptime
-# TYPE broker_uptime counter
-broker_uptime 12345
+# HELP mosquitto_broker_bytes_received_total The total number of bytes received since the broker started.
+# TYPE mosquitto_broker_bytes_received_total counter
+mosquitto_broker_bytes_received_total 1024
+# HELP mosquitto_broker_clients_connected The number of currently connected clients.
+# TYPE mosquitto_broker_clients_connected gauge
+mosquitto_broker_clients_connected 2
+# HELP mosquitto_broker_clients_expired_total The total number of disconnected persistent clients that have been expired and removed since the broker started.
+# TYPE mosquitto_broker_clients_expired_total counter
+mosquitto_broker_clients_expired_total 1
+# HELP mosquitto_broker_clients_total The number of currently connected and disconnected clients with a persistent session registered on the broker.
+# TYPE mosquitto_broker_clients_total gauge
+mosquitto_broker_clients_total 3
+# HELP mosquitto_broker_connections_socket_total The total number of socket connections opened since the broker started.
+# TYPE mosquitto_broker_connections_socket_total counter
+mosquitto_broker_connections_socket_total 9
+# HELP mosquitto_broker_info Information about the running broker; the sample value is always 1.
+# TYPE mosquitto_broker_info gauge
+mosquitto_broker_info{mosquitto_version="2.1.2"} 1
+# HELP mosquitto_broker_load_connections The moving average of the number of CONNECT packets received by the broker.
+# TYPE mosquitto_broker_load_connections gauge
+mosquitto_broker_load_connections{window="1m"} 0.25
+# HELP mosquitto_broker_messages_sent_total The total number of messages of any type sent since the broker started.
+# TYPE mosquitto_broker_messages_sent_total counter
+mosquitto_broker_messages_sent_total 50
+# HELP mosquitto_broker_messages_stored The number of messages currently held in the message store.
+# TYPE mosquitto_broker_messages_stored gauge
+mosquitto_broker_messages_stored 42
+# HELP mosquitto_broker_retained_messages The total number of retained messages active on the broker.
+# TYPE mosquitto_broker_retained_messages gauge
+mosquitto_broker_retained_messages 7
+# HELP mosquitto_broker_shared_subscriptions The total number of shared subscriptions active on the broker.
+# TYPE mosquitto_broker_shared_subscriptions gauge
+mosquitto_broker_shared_subscriptions 0
+# HELP mosquitto_broker_uptime_seconds The number of seconds since the broker started.
+# TYPE mosquitto_broker_uptime_seconds gauge
+mosquitto_broker_uptime_seconds 12345
+# HELP mosquitto_exporter_dropped_topics_total Total number of new, otherwise-exportable $SYS topics dropped because the tracked-topic cache was full.
+# TYPE mosquitto_exporter_dropped_topics_total counter
+mosquitto_exporter_dropped_topics_total 0
 # HELP mosquitto_exporter_invalid_payloads_total Total number of $SYS payloads that could not be parsed as a number and were therefore not recorded.
 # TYPE mosquitto_exporter_invalid_payloads_total counter
 mosquitto_exporter_invalid_payloads_total 0
-# HELP mosquitto_up Whether the exporter is currently connected to the Mosquitto broker (1) or not (0).
+# HELP mosquitto_exporter_unknown_topics_total Total number of $SYS topics received that are not in the exporter's static export table and were therefore not recorded.
+# TYPE mosquitto_exporter_unknown_topics_total counter
+mosquitto_exporter_unknown_topics_total 1
+# HELP mosquitto_up Whether the exporter is currently connected to the Mosquitto broker and its $SYS tree is fresh (1) or not (0).
 # TYPE mosquitto_up gauge
 mosquitto_up 1

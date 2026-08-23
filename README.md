@@ -40,7 +40,7 @@ GLOBAL OPTIONS:
    --ca-cert string                  Location of a PEM-encoded CA certificate used to verify the broker's TLS certificate [$MQTT_CA_CERT]
    --insecure-skip-verify            Disable TLS certificate verification of the broker (INSECURE - only for testing) [$MQTT_INSECURE_SKIP_VERIFY]
    --client-id string, -i string     Client id to be used to connect to the Mosquitto message broker [$MQTT_CLIENT_ID]
-   --reset-metrics, -r               Reset metrics when losing connection to broker [$RESET_METRICS]
+   --sys-interval duration           Sizes the $SYS/broker/uptime staleness-heartbeat window only (must be > 0): while connected, the broker is reported down if uptime has not advanced for 3x this duration. It does not expire individual cached series and should match the broker's own sys_interval (default: 10s) [$MQTT_SYS_INTERVAL]
    --help, -h                        show help
    --version, -v                     print the version
 ```
@@ -52,6 +52,24 @@ hand-maintained in source.
 
 ## Breaking changes since v0.7.7
 
+v1.0.0 renames every exported metric and changes a few flags. **See
+[`docs/MIGRATION.md`](docs/MIGRATION.md) for the full old->new metric mapping
+table, drop-in Prometheus recording rules for a transition window, and the
+complete upgrade checklist** - this section is only a summary:
+
+- **Every Prometheus metric is renamed**, five wrong types are fixed
+  (`clients_total`, `clients_maximum`, `uptime` were Counters and are now
+  Gauges; `connections_socket_count`, `clients_expired` were Gauges and are
+  now Counters), two duplicate series collapse into one, and the 24
+  redundant `load/**` EWMA series are dropped (their raw counters remain,
+  renamed, so `rate()` replaces them). Bridge status moves from the metric
+  name into a `mosquitto_bridge_name` label. Full mapping:
+  [`docs/MIGRATION.md`](docs/MIGRATION.md).
+- **`--reset-metrics`/`-r`/`RESET_METRICS` is removed.** It used to zero
+  every cached counter on disconnect, which fabricates a counter reset on
+  every broker flap. `mosquitto_up` plus every `mosquitto_broker_*` series
+  going absent together while disconnected now conveys the same fact
+  honestly.
 - **The broker password can no longer be passed on the command line.**
   `--pass` is gone. Use `--pass-file <path>` (a file containing the
   password) or the `MQTT_PASS` environment variable. An endpoint carrying
@@ -63,6 +81,13 @@ hand-maintained in source.
   lets you trust a private/self-signed broker CA without disabling
   verification at all. A cert-load failure now fails startup instead of
   silently continuing with a broken TLS config.
+- **New `--sys-interval`/`MQTT_SYS_INTERVAL` flag** (default `10s`, must be
+  positive). It sizes the `$SYS/broker/uptime` staleness-heartbeat window
+  only: while connected, `mosquitto_up` goes to 0 if `uptime` has not
+  advanced for 3x this duration (the broker's `$SYS` tree has stalled). It
+  does not expire any other cached series by age - a healthy, unchanging
+  value is reported for as long as the connection and heartbeat stay
+  healthy.
 
 ## Development notes
 

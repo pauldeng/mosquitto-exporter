@@ -156,7 +156,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 		return fmt.Errorf("configuring TLS: %w", err)
 	}
 
-	store := NewStore()
+	store := NewStore(cfg.SysInterval)
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(
 		store,
@@ -186,7 +186,6 @@ func Run(ctx context.Context, cfg config.Config) error {
 		}
 	}
 
-	resetOnDisconnect := cfg.ResetMetrics
 	opts.OnConnect = func(client mqtt.Client) {
 		slog.Info("connected to broker", "endpoint", endpoint)
 		store.SetConnected(true)
@@ -203,9 +202,6 @@ func Run(ctx context.Context, cfg config.Config) error {
 	opts.OnConnectionLost = func(_ mqtt.Client, err error) {
 		store.SetConnected(false)
 		slog.Warn("connection to broker lost", "endpoint", endpoint, "error", err)
-		if resetOnDisconnect {
-			store.Reset()
-		}
 	}
 
 	client := mqtt.NewClient(opts)

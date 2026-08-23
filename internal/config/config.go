@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"time"
 )
 
 // Config is the validated runtime configuration passed to the exporter.
@@ -17,7 +18,12 @@ type Config struct {
 	ClientID           string
 	Version            string
 	InsecureSkipVerify bool
-	ResetMetrics       bool
+	// SysInterval sizes the $SYS/broker/uptime staleness-heartbeat window
+	// only (DESIGN.md §5.3): while connected, the exporter treats the
+	// broker as down once uptime has not advanced for 3*SysInterval. It is
+	// not a per-topic expiry - every other cached series is reported
+	// regardless of age while connected.
+	SysInterval time.Duration
 }
 
 // Validate rejects credentials embedded in the broker URL. Passwords are
@@ -29,6 +35,9 @@ func (c Config) Validate() error {
 	}
 	if u.User != nil {
 		return fmt.Errorf("endpoint must not contain userinfo (user:pass@host); use --user/--pass-file or MQTT_USER/MQTT_PASS instead")
+	}
+	if c.SysInterval <= 0 {
+		return fmt.Errorf("sys-interval must be positive, got %s", c.SysInterval)
 	}
 	return nil
 }

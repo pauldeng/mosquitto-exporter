@@ -4,6 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/urfave/cli/v3"
 )
 
 func TestParseLogLevel(t *testing.T) {
@@ -47,5 +50,38 @@ func TestNoPasswordFlag(t *testing.T) {
 				t.Fatal("password must never be accepted on argv")
 			}
 		}
+	}
+}
+
+// TestNoResetMetricsFlag guards DESIGN.md §5.5/§6.5: --reset-metrics
+// fabricates counter resets on every broker flap and was removed as a
+// breaking change in v1.0.0. It must never come back.
+func TestNoResetMetricsFlag(t *testing.T) {
+	t.Parallel()
+	for _, flag := range newCommand().Flags {
+		for _, name := range flag.Names() {
+			if name == "reset-metrics" || name == "r" {
+				t.Fatal("--reset-metrics was removed in v1.0.0 (DESIGN.md §5.5) and must not be reintroduced")
+			}
+		}
+	}
+}
+
+// TestSysIntervalFlag pins the DESIGN.md §7 Phase 3 item 6 default (10s) and
+// that a non-default value round-trips through the command into
+// config.Config.SysInterval.
+func TestSysIntervalFlag(t *testing.T) {
+	t.Parallel()
+	var found *cli.DurationFlag
+	for _, flag := range newCommand().Flags {
+		if df, ok := flag.(*cli.DurationFlag); ok && df.Name == "sys-interval" {
+			found = df
+		}
+	}
+	if found == nil {
+		t.Fatal("--sys-interval flag not found")
+	}
+	if found.Value != 10*time.Second {
+		t.Errorf("--sys-interval default = %s, want 10s", found.Value)
 	}
 }
