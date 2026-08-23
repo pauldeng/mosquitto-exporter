@@ -1,0 +1,116 @@
+# otelcol-contrib config: ship mosquitto.log to Loki.
+#
+# Scope and rationale: mosquitto-exporter DESIGN.md §5.6 (config, not a Go
+# tailer - rotation/inode-tracking/checkpointing/backpressure already exist
+# here and in Alloy's loki.source.file), §4/§4.2 (verified broker log
+# facts), §2 (auth/ACL logging is explicitly out of scope - see the note
+# above the `logs` pipeline). Full operator guidance lives in
+# ../docs/LOGS.md - read it before deploying this.
+#
+# This is a FILE tailer. In Docker/Kubernetes, mosquitto's stdout is already
+# collected by the container runtime - don't point filelog at a file there.
+# See docs/LOGS.md "File vs. container stdout".
+#
+# Verified against a live eclipse-mosquitto:2.1.2-alpine container
+# (2026-08-23): most log lines, including every connection-lifecycle and
+# protocol-error line, carry NO "Error:"/"Warning:"/"Notice:"/"Information:"
+# word prefix at all - only a minority of lines (config errors, missing
+# ACL/cert files, ...) do. The two regex_parser stages below are built
+# around that: the epoch/message split (stage 1) is unconditional, and the
+# severity-word prefix (stage 2) is optional (`(?:...)?`) so a line without
+# it still parses and ships with its body intact - never dropped, never
+# assigned an invented level. See docs/LOGS.md for the real sample lines
+# this was checked against.
+
+receivers:
+  file_log/mosquitto:
+    include:
+      - /var/log/mosquitto/mosquitto.log
+    # avoid re-ingesting the whole file on first run; use `beginning` for a
+    # one-off backfill (docs/LOGS.md)
+    start_at: end
+    storage: file_storage/mosquitto # restart checkpointing - see docs/LOGS.md
+    operators:
+      # 1) Split "<epoch-seconds>: <rest of message>" (mosquitto's default
+      #    log_dest format). A line that doesn't match this shape at all is
+      #    still forwarded, unparsed, by on_error: send rather than dropped.
+      - type: regex_parser
+        regex: '^(?P<ts>\d+): (?P<msg>.*)$'
+        on_error: send
+        timestamp:
+          parse_from: attributes.ts
+          layout_type: epoch
+          layout: "s"
+      # 2) mosquitto prefixes only SOME lines with "Error: " / "Warning: " /
+      #    "Notice: " / "Information: ". This group is optional so lines
+      #    without it (the majority - see header) still match and ship with
+      #    their body intact. A bare word like "error" appearing mid-message
+      #    (e.g. "Protocol error from ...") is deliberately NOT treated as a
+      #    severity signal - only this exact leading prefix is trusted.
+      - type: regex_parser
+        parse_from: attributes.msg
+        regex: '^(?:(?P<level>Error|Warning|Notice|Information): )?(?P<body>.*)$'
+        on_error: send
+      - type: severity_parser
+        parse_from: attributes.level
+        on_error: send
+        mapping:
+          error: Error
+          warn: Warning
+          info:
+            - Notice
+            - Information
+      # 3) Body becomes the message with the epoch and any severity prefix
+      #    stripped; the intermediate parsing attributes are dropped so they
+      #    don't leak into Loki as noise labels.
+      - type: move
+        from: attributes.body
+        to: body
+      - type: remove
+        field: attributes.ts
+      - type: remove
+        field: attributes.msg
+      - type: remove
+        field: attributes.level
+
+extensions:
+  file_storage/mosquitto:
+    directory: /var/lib/otelcol/file_storage
+    create_directory: true
+
+processors:
+  batch: {}
+  resource/mosquitto:
+    attributes:
+      # Correlates these logs with this exporter's metrics in Grafana. Per
+      # DESIGN.md §4.1, target identity belongs in scrape/collector config,
+      # not invented by an exporter - the same rule applies here. Set
+      # MOSQUITTO_INSTANCE to whatever `instance` label your Prometheus
+      # scrape config already assigns to this broker/exporter pair (or the
+      # service.instance.id you set via OTEL_RESOURCE_ATTRIBUTES if you also
+      # use this exporter's OTLP metrics leg, docs/OTEL.md). See
+      # docs/LOGS.md "Correlating logs with metrics".
+      - key: service.name
+        value: mosquitto
+        action: upsert
+      - key: service.instance.id
+        value: ${env:MOSQUITTO_INSTANCE}
+        action: upsert
+
+exporters:
+  # Loki's native OTLP log ingestion (Loki >= 3.0, endpoint /otlp/v1/logs).
+  # otelcol-contrib no longer ships a standalone `loki` exporter (confirmed
+  # absent from v0.159.0's `components` output) - otlphttp against Loki's
+  # OTLP endpoint is the current, maintained path. See docs/LOGS.md for why.
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true # set false once Loki sits behind TLS
+
+service:
+  extensions: [file_storage/mosquitto]
+  pipelines:
+    logs:
+      receivers: [file_log/mosquitto]
+      processors: [resource/mosquitto, batch]
+      exporters: [otlphttp/loki]
