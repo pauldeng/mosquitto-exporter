@@ -1,0 +1,70 @@
+# mosquitto-exporter example configuration.
+#
+# Precedence: flags > environment variables > this YAML file > the
+# hardcoded defaults shown (commented out) below. Naming a config file
+# (--config or CONFIG_FILE) that is missing or malformed is a startup
+# error; not naming one at all is not - the exporter then behaves exactly
+# as if this file did not exist.
+#
+# Every key below is optional. Uncomment and edit only the ones you want
+# to override; the value shown next to each key is the exporter's own
+# default, not a value you must set.
+#
+# There is no "password" key. A password may only come from --pass-file
+# (a path to a file containing it, set below) or the MQTT_PASS environment
+# variable - never from this file, so a config file that's safe to commit
+# never carries a secret. LoadFile rejects a "password" key outright.
+
+# Endpoint for the Mosquitto message broker.
+# endpoint: tcp://127.0.0.1:1883
+
+# Listen address for the /metrics HTTP endpoint.
+# bind_address: 0.0.0.0:9234
+
+# Username for the Mosquitto message broker. Empty means no username.
+# user: ""
+
+# Path to a file containing the broker password. See the note above -
+# this is the only file-based way to supply a password.
+# pass_file: ""
+
+# Location of a TLS client certificate .pem file for the broker connection.
+# cert: ""
+
+# Location of a TLS client private key .pem file for the broker connection.
+# key: ""
+
+# Location of a PEM-encoded CA certificate used to verify the broker's TLS
+# certificate. Leave unset to trust the system CA pool.
+# ca_cert: ""
+
+# Disable TLS certificate verification of the broker. INSECURE - only for
+# testing; never enable this against a broker you don't fully trust.
+# insecure_skip_verify: false
+
+# Client ID used to connect to the broker. Empty lets the client library
+# generate one.
+# client_id: ""
+
+# Log level: debug, info, warn, or error.
+# log_level: info
+
+# Sizes the $SYS/broker/uptime staleness-heartbeat window only (must be a
+# positive Go duration, e.g. "10s"): while connected, the broker is
+# reported down if uptime has not advanced for 3x this duration. It does
+# not expire individual cached series and should match the broker's own
+# sys_interval.
+# sys_interval: 10s
+
+# OTLP receiver endpoint to push metrics to (e.g. localhost:4317 for grpc,
+# http://localhost:4318 for http). Empty (the default) disables OTLP
+# export entirely - no exporter is built and no OTLP network egress
+# happens. Prometheus scraping via /metrics is always on and unaffected.
+# otlp_endpoint: ""
+
+# OTLP wire protocol to use when otlp_endpoint is set: grpc or http.
+# otlp_protocol: grpc
+
+# Push interval for OTLP metric export when otlp_endpoint is set (must be
+# a positive Go duration).
+# otlp_interval: 60s

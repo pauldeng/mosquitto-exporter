@@ -30,11 +30,12 @@ AUTHORS:
    Paul Deng <dengpeng.cn@gmail.com>
 
 GLOBAL OPTIONS:
+   --config string                   Path to an optional YAML config file (precedence: flags > env > YAML > defaults). Not naming one, here or via CONFIG_FILE, is not an error; naming one that is missing or malformed is [$CONFIG_FILE]
    --log-level string                Log level (debug|info|warn|error) (default: "info") [$LOG_LEVEL]
    --endpoint string, -e string      Endpoint for the Mosquitto message broker (default: "tcp://127.0.0.1:1883") [$BROKER_ENDPOINT]
    --bind-address string, -b string  Listen address for metrics HTTP endpoint (default: "0.0.0.0:9234") [$BIND_ADDRESS]
    --user string, -u string          Username for the Mosquitto message broker [$MQTT_USER]
-   --pass-file string                Path to a file containing the password for the Mosquitto broker user (password can also come from MQTT_PASS; never pass it on argv) [$MQTT_PASS_FILE]
+   --pass-file string                Path to a file containing the password for the Mosquitto broker user (password can also come from MQTT_PASS; never pass it on argv, and never put it in the YAML config file) [$MQTT_PASS_FILE]
    --cert string, -c string          Location of a TLS certificate .pem file for the Mosquitto message broker [$MQTT_CERT]
    --key string, -k string           Location of a TLS private key .pem file for the Mosquitto message broker [$MQTT_KEY]
    --ca-cert string                  Location of a PEM-encoded CA certificate used to verify the broker's TLS certificate [$MQTT_CA_CERT]
@@ -58,6 +59,43 @@ is opt-in and off by default - Prometheus scraping via `/metrics` is
 unaffected either way. See [`docs/OTEL.md`](docs/OTEL.md) for a worked
 example, the OTel Prometheus exporter's experimental status, and the OTLP
 counter-reset limitation across broker restarts.
+
+## Configuration
+
+Every setting above can also come from a YAML config file. **Precedence is
+flags > environment variables > YAML > the hardcoded defaults shown in
+`--help`.** A setting only ever falls through to a lower-precedence source
+when the higher one didn't provide it - an explicit flag always wins, even
+if it happens to match the default.
+
+Point at a config file with `--config <path>` or the `CONFIG_FILE`
+environment variable (the flag wins if both are set). **The file is
+optional**: not naming one - which is the default - is not an error, and
+the exporter behaves exactly as it would with no config file support at
+all. Naming one that doesn't exist, or that fails to parse, *is* a startup
+error, since at that point it was named on purpose.
+
+The YAML keys mirror the flags one-for-one (`bind_address` for
+`--bind-address`, `sys_interval` for `--sys-interval`, and so on) - see
+[`mosquitto-exporter.example.yaml`](mosquitto-exporter.example.yaml) for
+the full, commented list with every default shown. Two things the loader
+enforces on purpose:
+
+- **Unknown keys are a startup error.** A typo'd key (`endpiont:`) is
+  otherwise indistinguishable from "not set" and would silently fall back
+  to the default.
+- **There is no `password` key.** A YAML file is something people are
+  encouraged to commit; a password field would make that unsafe. Supply a
+  password only via `--pass-file <path>` (a file containing it, settable
+  from YAML as `pass_file`) or the `MQTT_PASS` environment variable. A
+  `password:` key in the file is rejected outright, with an error
+  explaining why.
+
+At `--log-level debug`, the exporter logs the fully-resolved configuration
+once at startup - which value won, from whichever source - as a single
+`"effective configuration"` line. It never logs the password itself (only
+`password_set: true/false`), regardless of whether the password came from
+`--pass-file` or `MQTT_PASS`.
 
 ## Breaking changes since v0.7.7
 
