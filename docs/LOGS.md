@@ -34,8 +34,9 @@ agent to a host that already has a collector for something else. Otherwise:
   more (checked against its `components` output); OTLP is the current,
   maintained path, not a workaround.
 
-Both configs are mechanically equivalent: same file, same `<epoch>: <message>`
-parse, same severity rule, same correlation label.
+Both configs use the same file, `<epoch>: <message>` parse, and severity rule.
+Loki exposes the correlation value as `instance` for Alloy and
+`service_instance_id` for OTLP Collector logs.
 
 ## File vs. container stdout
 
@@ -87,15 +88,11 @@ live collector run: that acl-file line, and the "Protocol error" line, both
 ship with no severity label; the `Unknown configuration variable` line gets
 `Error`.
 
-**Any line that doesn't match at all still ships, with its body intact.**
-Both configs are built so a regex miss falls through rather than drops the
-entry - verified by running a line with no epoch prefix at all through both
-pipelines end to end; it came out the other side unchanged (see the phase
-report for the full transcript). This matters because log wording is not a
-stable interface: mosquitto's own disconnect line changed shape within the
-2.1.x patch line itself (2.1.0 added the `[address:port]` before the word
-"disconnected"). A parser that hard-fails on an unrecognized shape will start
-silently dropping lines on the next point release; these don't.
+**Unexpected line shapes are not rejected by the parser.** Both configs use
+one expression whose timestamp and severity groups are optional and whose
+body always matches. Alloy keeps the scrape timestamp when the epoch is
+missing; Collector leaves the event timestamp unset and retains its observed
+timestamp. This matters because log wording is not a stable interface.
 
 ## Setting `log_timestamp_format` (and its missing-offset trap)
 
@@ -162,7 +159,7 @@ special case for logs:
   process runs with to **whatever `instance` label your Prometheus scrape
   config already assigns** to this exporter's target (`relabel_configs` /
   `static_configs` labels), so a Grafana query can join
-  `{job="mosquitto"} | instance="..."` log lines against
+  `{job="mosquitto", instance="..."}` Alloy log lines against
   `mosquitto_broker_*{instance="..."}` metrics.
 - If you also push this exporter's metrics over its OTLP leg
   (`--otlp-endpoint`, see [OTEL.md](OTEL.md)), set `MOSQUITTO_INSTANCE` to
@@ -170,10 +167,12 @@ special case for logs:
   `service.instance.id`, and both signals carry identical OTel resource
   identity.
 
-`MOSQUITTO_INSTANCE` has no default in either config - `otelcol-contrib
-validate` refuses to start with it unset (verified). That's intentional:
-shipping logs with a blank/guessed instance identity is worse than failing
-loudly at startup.
+For Collector logs, use
+`{service_name="mosquitto", service_instance_id="..."}`; Loki's native OTLP
+ingestion normalizes dots in resource-attribute names to underscores. Alloy
+uses `{job="mosquitto", instance="..."}`. `otelcol-contrib validate` rejects
+an unset `MOSQUITTO_INSTANCE`; Alloy accepts it but omits the empty label, so
+set it explicitly whenever metrics/log correlation matters.
 
 ## Lower-fidelity alternative: `log_dest topic` (not implemented)
 

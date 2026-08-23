@@ -39,28 +39,16 @@ loki.source.file "mosquitto" {
 loki.process "mosquitto" {
 	forward_to = [loki.write.default.receiver]
 
-	// 1) Split "<epoch-seconds>: <rest of message>" (mosquitto's default
-	//    log_dest format). A line that doesn't match this shape at all falls
-	//    through with empty capture groups rather than being dropped - Loki
-	//    stages never drop a line just because a regex missed.
+	// Split the optional epoch and severity prefix from the body. The final
+	// body capture always matches, including for an unexpected line shape.
 	stage.regex {
-		expression = "^(?P<ts>\\d+): (?P<msg>.*)$"
+		expression = "^(?:(?P<ts>\\d+): )?(?:(?P<level>Error|Warning|Notice|Information): )?(?P<body>.*)$"
 	}
 
 	stage.timestamp {
-		source = "ts"
-		format = "Unix"
-	}
-
-	// 2) mosquitto prefixes only SOME lines with "Error: " / "Warning: " /
-	//    "Notice: " / "Information: ". This group is optional so lines
-	//    without it (the majority - see header) still match and keep their
-	//    body intact. A bare word like "error" appearing mid-message (e.g.
-	//    "Protocol error from ...") is deliberately NOT treated as a
-	//    severity signal - only this exact leading prefix is trusted.
-	stage.regex {
-		source     = "msg"
-		expression = "^(?:(?P<level>Error|Warning|Notice|Information): )?(?P<body>.*)$"
+		source            = "ts"
+		format            = "Unix"
+		action_on_failure = "skip"
 	}
 
 	// Promote the (possibly empty) severity word to a Loki label - bounded
@@ -72,9 +60,7 @@ loki.process "mosquitto" {
 	}
 
 	// Final log line is the message with the epoch and any severity prefix
-	// stripped. If neither regex matched (msg/body never set), `body`
-	// resolves empty and stage.output leaves the original line alone, so
-	// nothing is ever dropped.
+	// stripped.
 	stage.output {
 		source = "body"
 	}

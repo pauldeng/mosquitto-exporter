@@ -30,7 +30,7 @@ AUTHORS:
    Paul Deng <dengpeng.cn@gmail.com>
 
 GLOBAL OPTIONS:
-   --config string                   Path to an optional YAML config file (precedence: flags > env > YAML > defaults). Not naming one, here or via CONFIG_FILE, is not an error; naming one that is missing or malformed is [$CONFIG_FILE]
+   --config string                   Path to an optional YAML config file (precedence: flags > env > YAML > defaults). Not naming one, here or via CONFIG_FILE, is not an error; naming one that is missing or malformed is a startup error [$CONFIG_FILE]
    --log-level string                Log level (debug|info|warn|error) (default: "info") [$LOG_LEVEL]
    --endpoint string, -e string      Endpoint for the Mosquitto message broker (default: "tcp://127.0.0.1:1883") [$BROKER_ENDPOINT]
    --bind-address string, -b string  Listen address for metrics HTTP endpoint (default: "0.0.0.0:9234") [$BIND_ADDRESS]
@@ -91,11 +91,14 @@ enforces on purpose:
   `password:` key in the file is rejected outright, with an error
   explaining why.
 
+For the password specifically, an explicit `--pass-file` or
+`MQTT_PASS_FILE` wins over `MQTT_PASS`; otherwise `MQTT_PASS` wins over a
+YAML `pass_file`, preserving the environment-over-YAML rule.
+
 At `--log-level debug`, the exporter logs the fully-resolved configuration
 once at startup - which value won, from whichever source - as a single
-`"effective configuration"` line. It never logs the password itself (only
-`password_set: true/false`), regardless of whether the password came from
-`--pass-file` or `MQTT_PASS`.
+`"effective configuration"` line. Credential values are omitted: username
+and password are represented only as `user_set`/`password_set` booleans.
 
 ## Breaking changes since v0.7.7
 

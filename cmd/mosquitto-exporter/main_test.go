@@ -29,7 +29,7 @@ func TestParseLogLevel(t *testing.T) {
 func TestResolvePassword(t *testing.T) {
 	t.Run("environment fallback", func(t *testing.T) {
 		t.Setenv("MQTT_PASS", "s3cret")
-		got, err := resolvePassword("")
+		got, err := resolvePassword("", false)
 		if err != nil || got != "s3cret" {
 			t.Fatalf("got (%q, %v)", got, err)
 		}
@@ -40,8 +40,19 @@ func TestResolvePassword(t *testing.T) {
 		if err := os.WriteFile(path, []byte("filesecret\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		got, err := resolvePassword(path)
+		got, err := resolvePassword(path, true)
 		if err != nil || got != "filesecret" {
+			t.Fatalf("got (%q, %v)", got, err)
+		}
+	})
+	t.Run("environment takes precedence over YAML pass_file", func(t *testing.T) {
+		t.Setenv("MQTT_PASS", "envsecret")
+		path := filepath.Join(t.TempDir(), "pass")
+		if err := os.WriteFile(path, []byte("yamlsecret\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := resolvePassword(path, false)
+		if err != nil || got != "envsecret" {
 			t.Fatalf("got (%q, %v)", got, err)
 		}
 	})
@@ -220,9 +231,11 @@ func TestLogEffectiveConfigRedactsPassword(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	logEffectiveConfig(logger, cmd, config.Config{
-		Endpoint: "tcp://broker.example.com:1883",
-		Password: password,
+	logEffectiveConfig(logger, cmd, config.Config{ //nolint:gosec // G101: malformed endpoint proving credentials are redacted, not a real secret
+		Endpoint:     "tcp://broker.example.com:1883",
+		User:         "credential-user",
+		Password:     password,
+		OTLPEndpoint: "https://user:otlp-secret@collector.example.com",
 	})
 
 	out := buf.String()
@@ -234,5 +247,14 @@ func TestLogEffectiveConfigRedactsPassword(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(out), []byte(`"password_set":true`)) {
 		t.Errorf("effective-config log should record password_set=true: %s", out)
+	}
+	if bytes.Contains([]byte(out), []byte(`"user":`)) {
+		t.Errorf("effective-config log should not contain credential values: %s", out)
+	}
+	if bytes.Contains([]byte(out), []byte("credential-user")) {
+		t.Errorf("effective-config log leaked the username: %s", out)
+	}
+	if bytes.Contains([]byte(out), []byte("otlp-secret")) {
+		t.Errorf("effective-config log leaked endpoint credentials: %s", out)
 	}
 }

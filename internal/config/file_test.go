@@ -33,6 +33,8 @@ func TestConfigFilePath(t *testing.T) {
 		{name: "env only", args: nil, env: envFunc("/env/foo.yaml"), want: "/env/foo.yaml"},
 		{name: "flag wins over env", args: []string{"--config", "/flag/foo.yaml"}, env: envFunc("/env/foo.yaml"), want: "/flag/foo.yaml"},
 		{name: "other flags ignored", args: []string{"--endpoint", "tcp://x:1883", "--config=/etc/foo.yaml"}, env: noEnv, want: "/etc/foo.yaml"},
+		{name: "config after argument terminator ignored", args: []string{"--", "--config=/etc/foo.yaml"}, env: noEnv, want: ""},
+		{name: "env still applies after argument terminator", args: []string{"--", "--config=/etc/foo.yaml"}, env: envFunc("/env/foo.yaml"), want: "/env/foo.yaml"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -179,6 +181,22 @@ otlp_interval: 30s
 		}
 		if got := err.Error(); !strings.Contains(got, "pass_file") {
 			t.Errorf("error = %q, want it to point at pass_file", got)
+		}
+	})
+
+	t.Run("null password key is still rejected", func(t *testing.T) {
+		t.Parallel()
+		path := writeYAML(t, "password: null\n")
+		if _, err := LoadFile(path); err == nil {
+			t.Fatal("expected an error for a password key even when its value is null")
+		}
+	})
+
+	t.Run("multiple YAML documents are rejected", func(t *testing.T) {
+		t.Parallel()
+		path := writeYAML(t, "endpoint: tcp://first:1883\n---\nendpoint: tcp://ignored:1883\n")
+		if _, err := LoadFile(path); err == nil {
+			t.Fatal("expected an error for multiple YAML documents")
 		}
 	})
 

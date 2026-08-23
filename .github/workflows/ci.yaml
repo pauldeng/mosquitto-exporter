@@ -100,3 +100,12 @@ jobs:
           fi
           grep -q '^--- PASS: TestIntegrationSmoke' integration.log
         shell: bash
+
+  logs-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: validate OpenTelemetry Collector config
+        run: docker run --rm -e MOSQUITTO_INSTANCE=test -v "$PWD/deploy/otelcol-contrib.yaml:/etc/otelcol.yaml:ro" otel/opentelemetry-collector-contrib:0.159.0@sha256:1f2c54a30e713fac6b3ae77a1ec84010c2007e29ced8ec666214fc2f6739c1cc validate --config=file:/etc/otelcol.yaml
+      - name: validate Grafana Alloy config
+        run: docker run --rm -e MOSQUITTO_INSTANCE=test -v "$PWD/deploy/alloy.river:/etc/alloy/config.alloy:ro" grafana/alloy:v1.18.1@sha256:0f4434c92b3e6cdac38bb129b344e1790c246f7b6e2eaffcc16a5fa363240e33 validate /etc/alloy/config.alloy

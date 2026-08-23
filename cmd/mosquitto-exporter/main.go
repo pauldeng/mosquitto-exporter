@@ -36,9 +36,14 @@ func parseLogLevel(value string) (slog.Level, error) {
 	}
 }
 
-func resolvePassword(passFile string) (string, error) {
+func resolvePassword(passFile string, passFileSet bool) (string, error) {
+	if !passFileSet {
+		if password, ok := os.LookupEnv("MQTT_PASS"); ok {
+			return password, nil
+		}
+	}
 	if passFile == "" {
-		return os.Getenv("MQTT_PASS"), nil
+		return "", nil
 	}
 	//nolint:gosec // G304: passFile is the operator-supplied --pass-file
 	data, err := os.ReadFile(passFile)
@@ -80,9 +85,9 @@ func or[T any](v *T, def T) T {
 func logEffectiveConfig(logger *slog.Logger, cmd *cli.Command, cfg config.Config) {
 	logger.Debug("effective configuration",
 		"config_file", cmd.String("config"),
-		"endpoint", cfg.Endpoint,
+		"endpoint", redactEndpoint(cfg.Endpoint),
 		"bind_address", cfg.BindAddress,
-		"user", cfg.User,
+		"user_set", cfg.User != "",
 		"password_set", cfg.Password != "",
 		"pass_file", cmd.String("pass-file"),
 		"cert", cfg.CertFile,
@@ -92,10 +97,17 @@ func logEffectiveConfig(logger *slog.Logger, cmd *cli.Command, cfg config.Config
 		"client_id", cfg.ClientID,
 		"log_level", cmd.String("log-level"),
 		"sys_interval", cfg.SysInterval.String(),
-		"otlp_endpoint", cfg.OTLPEndpoint,
+		"otlp_endpoint", redactEndpoint(cfg.OTLPEndpoint),
 		"otlp_protocol", cfg.OTLPProtocol,
 		"otlp_interval", cfg.OTLPInterval.String(),
 	)
+}
+
+func redactEndpoint(endpoint string) string {
+	if strings.Contains(endpoint, "@") {
+		return "[redacted]"
+	}
+	return endpoint
 }
 
 func newCommand(fc *config.FileConfig) *cli.Command {
@@ -118,7 +130,7 @@ func newCommand(fc *config.FileConfig) *cli.Command {
 			return ctx, nil
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
-			password, err := resolvePassword(cmd.String("pass-file"))
+			password, err := resolvePassword(cmd.String("pass-file"), cmd.IsSet("pass-file"))
 			if err != nil {
 				return err
 			}
@@ -144,7 +156,7 @@ func newCommand(fc *config.FileConfig) *cli.Command {
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:    "config",
-				Usage:   "Path to an optional YAML config file (precedence: flags > env > YAML > defaults). Not naming one, here or via CONFIG_FILE, is not an error; naming one that is missing or malformed is",
+				Usage:   "Path to an optional YAML config file (precedence: flags > env > YAML > defaults). Not naming one, here or via CONFIG_FILE, is not an error; naming one that is missing or malformed is a startup error",
 				Sources: cli.EnvVars("CONFIG_FILE"),
 			},
 			&cli.StringFlag{Name: "log-level", Usage: "Log level (debug|info|warn|error)", Value: or(fc.LogLevel, "info"), Sources: cli.EnvVars("LOG_LEVEL")},
