@@ -67,7 +67,7 @@ func main() {
 }
 
 // or returns v if non-nil, otherwise def. It layers an optional YAML value
-// in as a flag's default (DESIGN.md §7 Phase 5): explicit flag > env > YAML
+// in as a flag's default: explicit flag > env > YAML
 // > this hardcoded default, because urfave/cli only falls back to a flag's
 // Value when neither the command line nor its env Sources set it.
 func or[T any](v *T, def T) T {
@@ -77,8 +77,8 @@ func or[T any](v *T, def T) T {
 	return def
 }
 
-// logEffectiveConfig logs the resolved configuration once at startup
-// (decision 10.12). It never logs cfg itself - a %v/%+v of Config would
+// logEffectiveConfig logs the resolved configuration once at startup. It
+// never logs cfg itself - a %v/%+v of Config would
 // include Password - and it logs only whether a password was set, never
 // its value, regardless of whether that value came from a flag, env,
 // YAML, or --pass-file.
@@ -160,9 +160,9 @@ func newCommand(fc *config.FileConfig) *cli.Command {
 				Sources: cli.EnvVars("CONFIG_FILE"),
 			},
 			&cli.StringFlag{Name: "log-level", Usage: "Log level (debug|info|warn|error)", Value: or(fc.LogLevel, "info"), Sources: cli.EnvVars("LOG_LEVEL")},
-			&cli.StringFlag{Name: "endpoint", Aliases: []string{"e"}, Usage: "Endpoint for the Mosquitto message broker", Value: or(fc.Endpoint, "tcp://127.0.0.1:1883"), Sources: cli.EnvVars("BROKER_ENDPOINT")},
-			&cli.StringFlag{Name: "bind-address", Aliases: []string{"b"}, Usage: "Listen address for metrics HTTP endpoint", Value: or(fc.BindAddress, "0.0.0.0:9234"), Sources: cli.EnvVars("BIND_ADDRESS")},
-			&cli.StringFlag{Name: "user", Aliases: []string{"u"}, Usage: "Username for the Mosquitto message broker", Value: or(fc.User, ""), Sources: cli.EnvVars("MQTT_USER")},
+			&cli.StringFlag{Name: "endpoint", Aliases: []string{"e"}, Usage: "Endpoint for the Mosquitto message broker; credentials require TLS or a local unix socket", Value: or(fc.Endpoint, "tcp://127.0.0.1:1883"), Sources: cli.EnvVars("BROKER_ENDPOINT")},
+			&cli.StringFlag{Name: "bind-address", Aliases: []string{"b"}, Usage: "Listen address for metrics HTTP endpoint", Value: or(fc.BindAddress, "127.0.0.1:9234"), Sources: cli.EnvVars("BIND_ADDRESS")},
+			&cli.StringFlag{Name: "user", Aliases: []string{"u"}, Usage: "Username for the Mosquitto message broker (requires TLS or a local unix socket)", Value: or(fc.User, ""), Sources: cli.EnvVars("MQTT_USER")},
 			&cli.StringFlag{
 				Name:    "pass-file",
 				Usage:   "Path to a file containing the password for the Mosquitto broker user (password can also come from MQTT_PASS; never pass it on argv, and never put it in the YAML config file)",
@@ -182,7 +182,7 @@ func newCommand(fc *config.FileConfig) *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "otlp-endpoint",
-				Usage:   "OTLP receiver endpoint to push metrics to (e.g. localhost:4317 for grpc, http://localhost:4318 for http); empty disables OTLP export entirely, no exporter is built and no OTLP network egress happens. Prometheus scraping via /metrics is always on and unaffected",
+				Usage:   "EXPERIMENTAL: OTLP receiver endpoint to push metrics to; empty disables OTLP export. Counter resets after broker restarts are not yet represented correctly in OTLP",
 				Value:   or(fc.OTLPEndpoint, ""),
 				Sources: cli.EnvVars("OTLP_ENDPOINT"),
 			},

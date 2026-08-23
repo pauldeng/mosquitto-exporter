@@ -2,7 +2,7 @@
 
 **This exporter does not tail files.** It holds an MQTT socket to the
 broker's `$SYS` tree and has no code path that opens, watches, or parses
-`mosquitto.log` (DESIGN.md §5.6). Log rotation detection, inode tracking,
+`mosquitto.log`. Log rotation detection, inode tracking,
 restart checkpointing, multiline assembly, backpressure and retry are a
 solved problem, already battle-tested in the OpenTelemetry Collector's
 `filelog` receiver and in Grafana Alloy's `loki.source.file` - reimplementing
@@ -150,7 +150,7 @@ for your Loki tenant.
 
 Both configs attach a `service.instance.id` resource attribute (otelcol) /
 `instance` label (Alloy) so you can join a broker's logs to this exporter's
-metrics in Grafana. Per DESIGN.md §4.1, this exporter deliberately does not
+metrics in Grafana. This exporter deliberately does not
 invent or export its own identity label - target identity belongs in
 scrape/collector config, and the same rule is kept here rather than adding a
 special case for logs:
@@ -192,13 +192,13 @@ recorded here as an available broker feature and a possible future option:
   history to backfill from, only what's published while a subscriber is
   connected.
 
-If this becomes worth having, it's a Phase 7 addition to the exporter itself
+If this becomes worth having, it would be an addition to the exporter itself
 (an opt-in `$SYS/broker/log/#` → OTel log-record bridge), not a change to
 either file in `deploy/`.
 
 ## Out of scope: auth/ACL logging
 
 Neither pipeline attempts to extract authentication or ACL-denial signal
-from these logs. DESIGN.md §2 covers why in detail: ACL denials are
+from these logs. ACL denials are
 DEBUG-only, and every auth failure collapses into one generic NOTICE line
 with no username - log parsing cannot recover what the broker never logged.

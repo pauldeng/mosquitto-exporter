@@ -9,7 +9,7 @@ import (
 )
 
 // TestNewOTLPExporter covers every branch of newOTLPExporter's protocol/
-// scheme dispatch (DESIGN.md §7 Phase 4 item 5). None of these dial
+// scheme dispatch. None of these dial
 // synchronously (grpc and http OTLP exporters connect lazily), so
 // constructing against an address nothing listens on is safe and fast; each
 // case still Shuts down its exporter so no client-internal goroutine leaks

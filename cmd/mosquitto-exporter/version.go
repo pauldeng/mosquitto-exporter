@@ -20,5 +20,8 @@ var Commit = func() string {
 }()
 
 func versionString() string {
+	if Commit == "" {
+		return fmt.Sprintf("%s, %s", Version, runtime.Version())
+	}
 	return fmt.Sprintf("%s (%s), %s", Version, Commit, runtime.Version())
 }

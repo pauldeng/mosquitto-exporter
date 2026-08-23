@@ -219,8 +219,8 @@ otlp_interval: 30s
 	})
 }
 
-// TestExampleYAMLParses guards mosquitto-exporter.example.yaml against rot
-// (DESIGN.md §7 Phase 5 item 7): every key it shows must be one this
+// TestExampleYAMLParses guards mosquitto-exporter.example.yaml against rot:
+// every key it shows must be one this
 // strict, single-Decode-call-site loader actually accepts.
 func TestExampleYAMLParses(t *testing.T) {
 	t.Parallel()

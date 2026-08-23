@@ -1,15 +1,15 @@
 # HELP mosquitto_broker_bytes_received_total The total number of bytes received since the broker started.
 # TYPE mosquitto_broker_bytes_received_total counter
 mosquitto_broker_bytes_received_total 1024
+# HELP mosquitto_broker_clients The number of currently connected and disconnected clients with a persistent session registered on the broker.
+# TYPE mosquitto_broker_clients gauge
+mosquitto_broker_clients 3
 # HELP mosquitto_broker_clients_connected The number of currently connected clients.
 # TYPE mosquitto_broker_clients_connected gauge
 mosquitto_broker_clients_connected 2
 # HELP mosquitto_broker_clients_expired_total The total number of disconnected persistent clients that have been expired and removed since the broker started.
 # TYPE mosquitto_broker_clients_expired_total counter
 mosquitto_broker_clients_expired_total 1
-# HELP mosquitto_broker_clients_total The number of currently connected and disconnected clients with a persistent session registered on the broker.
-# TYPE mosquitto_broker_clients_total gauge
-mosquitto_broker_clients_total 3
 # HELP mosquitto_broker_connections_socket_total The total number of socket connections opened since the broker started.
 # TYPE mosquitto_broker_connections_socket_total counter
 mosquitto_broker_connections_socket_total 9

@@ -9,9 +9,8 @@ import (
 	"unicode/utf8"
 )
 
-// These are the highest-value tests in the project: Resolve is the single
-// entry point every exported metric flows through, and 8 G2 sets this
-// package's coverage floor at 90%.
+// Resolve is the single entry point every exported metric flows through, so
+// this package has a high coverage floor.
 
 // validMetricName and validLabelKey are the Prometheus exposition-format
 // grammars (client_golang model.IsValidMetricName / LabelName), used to
@@ -21,7 +20,7 @@ var (
 	validLabelKey   = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 )
 
-// topicCase is one entry of the static export table (DESIGN.md §6.1/§6.2),
+// topicCase is one entry of the static export table,
 // paired with a payload that resolves cleanly. This is the golden test that
 // catches a wrong topic string: renaming, removing or reclassifying an
 // entry in sys.go without updating this table fails here.
@@ -52,17 +51,17 @@ var topicCases = []topicCase{
 		Sample{Name: "mosquitto_broker_publish_messages_sent_total", Kind: Counter, Value: 7}},
 	{"publish/messages/dropped", "$SYS/broker/publish/messages/dropped", "0",
 		Sample{Name: "mosquitto_broker_publish_messages_dropped_total", Kind: Counter, Value: 0}},
-	// Fix (§3.4): was a Gauge.
+	// Fix: was a Gauge.
 	{"connections/socket/count (fixed to Counter)", "$SYS/broker/connections/socket/count", "3",
 		Sample{Name: "mosquitto_broker_connections_socket_total", Kind: Counter, Value: 3}},
-	// Fix (§3.4): was a Gauge.
+	// Fix: was a Gauge.
 	{"clients/expired (fixed to Counter)", "$SYS/broker/clients/expired", "2",
 		Sample{Name: "mosquitto_broker_clients_expired_total", Kind: Counter, Value: 2}},
 
 	// --- Gauges ---
-	// Fix (§3.4): was a Counter.
+	// Fix: was a Counter.
 	{"clients/total (fixed to Gauge)", "$SYS/broker/clients/total", "5",
-		Sample{Name: "mosquitto_broker_clients_total", Kind: Gauge, Value: 5}},
+		Sample{Name: "mosquitto_broker_clients", Kind: Gauge, Value: 5}},
 	{"clients/connected", "$SYS/broker/clients/connected", "4",
 		Sample{Name: "mosquitto_broker_clients_connected", Kind: Gauge, Value: 4}},
 	{"clients/active (deprecated alias)", "$SYS/broker/clients/active", "4",
@@ -71,7 +70,7 @@ var topicCases = []topicCase{
 		Sample{Name: "mosquitto_broker_clients_disconnected", Kind: Gauge, Value: 1}},
 	{"clients/inactive (deprecated alias)", "$SYS/broker/clients/inactive", "1",
 		Sample{Name: "mosquitto_broker_clients_disconnected", Kind: Gauge, Value: 1}},
-	// Fix (§3.4): was a Counter.
+	// Fix: was a Counter.
 	{"clients/maximum (fixed to Gauge)", "$SYS/broker/clients/maximum", "6",
 		Sample{Name: "mosquitto_broker_clients_maximum", Kind: Gauge, Value: 6}},
 	{"messages/stored", "$SYS/broker/messages/stored", "11",
@@ -94,11 +93,11 @@ var topicCases = []topicCase{
 		Sample{Name: "mosquitto_broker_packet_out_count", Kind: Gauge, Value: 5}},
 	{"packet/out/bytes", "$SYS/broker/packet/out/bytes", "1024",
 		Sample{Name: "mosquitto_broker_packet_out_bytes", Kind: Gauge, Unit: "By", Value: 1024}},
-	// Fix (§3.4): was a Counter. Payload carries a trailing unit ("seconds").
+	// Fix: was a Counter. Payload carries a trailing unit ("seconds").
 	{"uptime (fixed to Gauge)", "$SYS/broker/uptime", "12345 seconds",
 		Sample{Name: "mosquitto_broker_uptime_seconds", Kind: Gauge, Unit: "s", Value: 12345}},
 
-	// --- load/connections: the one load/** series kept (§6.3) ---
+	// --- load/connections: the one load/** series kept ---
 	{"load/connections/1min", "$SYS/broker/load/connections/1min", "0.50",
 		Sample{Name: "mosquitto_broker_load_connections", Kind: Gauge, Unit: "1/s", Value: 0.50, Labels: map[string]string{"window": "1m"}}},
 	{"load/connections/5min", "$SYS/broker/load/connections/5min", "0.75",
@@ -108,7 +107,7 @@ var topicCases = []topicCase{
 }
 
 // droppedLoadTopics are the 24 load/** series that are pure EWMAs of a
-// counter already exported above (§6.3, decision 10.4) and must never
+// counter already exported above and must never
 // produce a Sample.
 var droppedLoadTopics = func() []string {
 	categories := []string{
@@ -130,7 +129,7 @@ var droppedLoadTopics = func() []string {
 func TestResolve_knownTopics(t *testing.T) {
 	t.Parallel()
 	if len(topicCases) != 31 {
-		t.Fatalf("topicCases has %d entries, want 31 (see DESIGN.md §6.1/§6.2/§6.3)", len(topicCases))
+		t.Fatalf("topicCases has %d entries, want 31 (see the metric contract)", len(topicCases))
 	}
 	for _, tt := range topicCases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -200,14 +199,14 @@ func TestInstruments(t *testing.T) {
 func TestResolve_droppedLoadSeries(t *testing.T) {
 	t.Parallel()
 	if len(droppedLoadTopics) != 24 {
-		t.Fatalf("droppedLoadTopics has %d entries, want 24 (8 categories x 3 windows, §6.3)", len(droppedLoadTopics))
+		t.Fatalf("droppedLoadTopics has %d entries, want 24 (8 categories x 3 windows, )", len(droppedLoadTopics))
 	}
 	for _, topic := range droppedLoadTopics {
 		t.Run(topic, func(t *testing.T) {
 			t.Parallel()
 			got, reason := Resolve(topic, "42")
 			// Excluded, not NotExported: these are recognised and dropped on
-			// purpose (§6.3). Conflating them with unknown topics makes the
+			// purpose. Conflating them with unknown topics makes the
 			// unknown-topic counter climb by 24 every sys_interval on a
 			// healthy broker and buries the signal it exists to give.
 			if reason != Excluded {
@@ -252,7 +251,7 @@ func TestResolve_unknownTopics(t *testing.T) {
 }
 
 // TestResolve_aliasCollapse proves each deprecated pair yields exactly one
-// series (§6.3): both topics resolve to the same Name, not merely to the
+// series: both topics resolve to the same Name, not merely to the
 // same hardcoded string in topicCases above.
 func TestResolve_aliasCollapse(t *testing.T) {
 	t.Parallel()
@@ -407,8 +406,7 @@ func TestResolve_invalidPayload(t *testing.T) {
 }
 
 // TestResolve_validNames proves every Name and label key this package can
-// produce would actually render as a Prometheus/OTel series: G1 requires
-// this, not just eyeballing the table above.
+// produce renders as a Prometheus/OTel series.
 func TestResolve_validNames(t *testing.T) {
 	t.Parallel()
 	samples := make([]Sample, 0, len(topicCases)+2)

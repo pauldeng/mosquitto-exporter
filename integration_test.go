@@ -2,24 +2,20 @@
 
 package main
 
-// Docker-backed integration test (DESIGN.md §7 Phase 0 item 3, extended by
-// Phase 3 item 8): starts the official broker image with a non-default
-// sys_interval, connects the real exporter binary, drives enough real MQTT
-// traffic to move every asserted counter off its initial value, and asserts
-// the full Phase 3 (§6) exported series set.
+// Docker-backed integration test: starts the official broker image with a
+// non-default sys_interval, connects the real exporter binary, drives MQTT
+// traffic to move every asserted counter, and verifies the exported series.
 //
 // Run with: go test -count=1 -tags=integration -run TestIntegrationSmoke -v ./...
 // Skips cleanly if Docker isn't available, so it never fails on a laptop
 // without it.
 //
-// Why "drive traffic, not just connect": $SYS values are change-gated
-// (DESIGN.md §4) - metrics.next is only published when it differs from
-// metrics.current. On a truly static value, a naive test could conclude a
+// Why "drive traffic, not just connect": $SYS values are change-gated;
+// metrics.next is published only when it differs from metrics.current.
+// On a truly static value, a naive test could conclude a
 // counter never gets exported at all.
 //
-// Empirically verified against a live eclipse-mosquitto:2.1.2-alpine
-// container (2026-08-23) for this handoff: the broker's *first* sys_interval
-// tick after any client connects (the exporter's own $SYS/# subscription
+// Empirically, the first tick after any client connects (the exporter's own $SYS/# subscription
 // counts) publishes a full baseline snapshot of every tracked metric,
 // including ones that are still at their zero-valued default (observed
 // directly for publish/messages/dropped, clients/expired,
@@ -28,8 +24,8 @@ package main
 // an always-zero counter still gets exported, because the exporter's own
 // $SYS/# subscription is itself the "activity" that triggers that first
 // snapshot - this test does not rely on that alone, though, and still
-// drives real traffic through every counter that traffic can plausibly move
-// (DESIGN.md §7 Phase 3 item 8's instruction), both for stronger assertions
+// drives real traffic through every counter that traffic can plausibly move,
+// both for stronger assertions
 // (some counters are checked non-zero, not just present) and as a safety net
 // in case that first-tick behaviour is broker-version-specific.
 //
@@ -53,8 +49,8 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
-// nonDefaultSysInterval is deliberately not the exporter's 10s default
-// (DESIGN.md §7 Phase 3 item 6/8): it exercises --sys-interval end to end,
+// nonDefaultSysInterval deliberately differs from the exporter's 10s default
+// to exercise --sys-interval end to end,
 // on both the broker (so $SYS actually ticks this often) and the exporter
 // (so its heartbeat window is sized to match).
 const nonDefaultSysInterval = 3 * time.Second
@@ -121,7 +117,7 @@ func startBroker(t *testing.T, confPath string) int {
 	out, err := exec.Command("docker", "run", "-d",
 		"-p", fmt.Sprintf("127.0.0.1:%d:1883", brokerPort),
 		"-v", confPath+":/mosquitto/config/mosquitto.conf:ro",
-		"eclipse-mosquitto:2.1.2-alpine",
+		"eclipse-mosquitto:2.1.2-alpine@sha256:6f8d8a947c506f8a2290ec65cd4bd2bc7cb4d43fb5f6271f861cb013e2ef9797",
 	).Output()
 	if err != nil {
 		t.Fatalf("starting mosquitto container: %v", err)
@@ -170,7 +166,7 @@ func mustConnect(t *testing.T, opts *mqtt.ClientOptions) mqtt.Client {
 }
 
 // generateTraffic drives enough real MQTT activity to move every asserted
-// $SYS counter off its initial value (DESIGN.md §7 Phase 3 item 8):
+// $SYS counter off its initial value:
 //   - a plain connect+publish+subscribe for the message/byte/packet counters
 //     and connections/socket/count;
 //   - a persistent-session (CleanSession=false) client that connects then
@@ -231,7 +227,7 @@ func generateTraffic(t *testing.T, brokerPort int, sysInterval time.Duration) {
 	// Shared subscription: held open across at least one full sys_interval
 	// tick so the broker publishes shared_subscriptions/count > 0 at least
 	// once while it is active. It does not need to still be connected at
-	// scrape time - the value is retained (DESIGN.md §4), so whatever was
+	// scrape time - the value is retained, so whatever was
 	// last published (0 or 1) is what a later subscriber receives; the point
 	// here is only to make sure a change away from the unpublished/zero
 	// state actually happens.
@@ -250,11 +246,10 @@ func generateTraffic(t *testing.T, brokerPort int, sysInterval time.Duration) {
 	t.Cleanup(func() { <-shareDone })
 }
 
-// expectedSeries is the full Phase 3 (DESIGN.md §6) exported metric family
 // set this test asserts present in /metrics after driving traffic, minus
 // excludedSeries.
 var expectedSeries = []string{
-	// Counters (§6.1).
+	// Counters.
 	"mosquitto_broker_messages_received_total",
 	"mosquitto_broker_messages_sent_total",
 	"mosquitto_broker_bytes_received_total",
@@ -266,8 +261,8 @@ var expectedSeries = []string{
 	"mosquitto_broker_publish_messages_dropped_total",
 	"mosquitto_broker_connections_socket_total",
 	"mosquitto_broker_clients_expired_total",
-	// Gauges (§6.2).
-	"mosquitto_broker_clients_total",
+	// Gauges.
+	"mosquitto_broker_clients",
 	"mosquitto_broker_clients_connected",
 	"mosquitto_broker_clients_disconnected",
 	"mosquitto_broker_clients_maximum",
@@ -281,7 +276,7 @@ var expectedSeries = []string{
 	"mosquitto_broker_heap_current_bytes",
 	"mosquitto_broker_heap_maximum_bytes",
 	"mosquitto_broker_uptime_seconds",
-	// Shape changes (§6.3).
+	// Shape changes.
 	"mosquitto_broker_load_connections",
 	"mosquitto_broker_info",
 	// Exporter self-metrics.
@@ -291,11 +286,10 @@ var expectedSeries = []string{
 	"mosquitto_exporter_dropped_topics_total",
 }
 
-// excludedSeries lists every DESIGN.md §6 series deliberately not asserted,
-// with the reason it cannot be produced from this harness (DESIGN.md §7
-// Phase 3 item 8).
+// excludedSeries lists every series deliberately not asserted, with the reason
+// it cannot be produced from this harness.
 var excludedSeries = map[string]string{
-	"mosquitto_broker_bridge_connected": "requires an admin-configured bridge to a second broker (DESIGN.md §6.3); " +
+	"mosquitto_broker_bridge_connected": "requires an admin-configured bridge to a second broker; " +
 		"this single-broker harness never publishes $SYS/broker/connection/+/state at all, so no traffic pattern " +
 		"can produce it. The topic->label mapping itself is unit-tested in internal/sys.",
 }
@@ -373,7 +367,7 @@ func TestIntegrationSmoke(t *testing.T) {
 	for _, name := range []string{
 		"mosquitto_broker_messages_received_total",
 		"mosquitto_broker_publish_messages_received_total",
-		"mosquitto_broker_clients_total",
+		"mosquitto_broker_clients",
 	} {
 		value, ok := metricValue(body, name)
 		if !ok {
@@ -385,7 +379,7 @@ func TestIntegrationSmoke(t *testing.T) {
 		}
 	}
 
-	t.Logf("saw the full expected Phase 3 series set on port %d after driving traffic (sys_interval=%s); excluded: %v",
+	t.Logf("saw the full expected broker series set on port %d after driving traffic (sys_interval=%s); excluded: %v",
 		brokerPort, nonDefaultSysInterval, excludedNames())
 }
 
@@ -411,7 +405,7 @@ func excludedNames() []string {
 
 // metricValue returns the value of body's unlabelled sample line for name
 // ("<name> <value>", no "{...}" label suffix), e.g. for
-// "mosquitto_broker_clients_total 3" it returns ("3", true).
+// "mosquitto_broker_clients 3" it returns ("3", true).
 func metricValue(body, name string) (string, bool) {
 	for line := range strings.SplitSeq(body, "\n") {
 		if value, ok := strings.CutPrefix(line, name+" "); ok {

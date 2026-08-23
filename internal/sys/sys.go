@@ -1,7 +1,7 @@
 // Package sys resolves a raw $SYS topic and payload into the Prometheus
-// series it exports. All topic knowledge (the static 2.1.2 inventory, the
-// final v1.0.0 names from DESIGN.md §6, the alias collapses and the dropped
-// load/** series) and all payload parsing live here, behind Resolve. Pure
+// series it exports. All topic knowledge (the static 2.1.2 inventory, final
+// v1.0.0 names, alias collapses, and dropped load/** series) and all payload
+// parsing live here, behind Resolve. Pure
 // functions only: no I/O, no globals mutated at runtime, no clock.
 package sys
 
@@ -45,12 +45,12 @@ const (
 	OK             Reason = iota
 	NotExported           // unrecognised topic: not in the static table
 	InvalidPayload        // topic is known but the payload did not parse
-	Excluded              // recognised, but deliberately not exported (§6.3)
+	Excluded              // recognised, but deliberately not exported
 )
 
 // topicSpec is the static, versioned mapping for one $SYS topic. Two topic
 // keys sharing the same name/kind/help collapse a deprecated alias onto its
-// canonical series (DESIGN.md §6.3); labels is nil except for the three
+// canonical series; labels is nil except for the three
 // load/connections/* entries, which share one name distinguished by window.
 type topicSpec struct {
 	name   string
@@ -61,14 +61,13 @@ type topicSpec struct {
 }
 
 // topics is the complete, static export table: the verified 2.1.2 $SYS
-// inventory (DESIGN.md §4), renamed per §6.1/§6.2, reclassified per the five
-// §3.4 fixes, with the three deprecated aliases collapsed 2→1 and only
-// load/connections/** kept out of the 27 load/** series (§6.3). version and
+// inventory, with corrected names and types, three deprecated aliases
+// collapsed 2→1, and only load/connections/** kept out of the 27 load/** series. Version and
 // bridge connection-state topics are handled outside this map (see Resolve).
 // A topic that is in none of these is unknown and returns NotExported —
 // there is no dynamic discovery and no gauge-by-default fallback.
 var topics = map[string]topicSpec{
-	// --- Counters (§6.1) ---
+	// Counters.
 	"$SYS/broker/messages/received": {
 		name: "mosquitto_broker_messages_received_total", kind: Counter,
 		help: "The total number of messages of any type received since the broker started.",
@@ -105,28 +104,28 @@ var topics = map[string]topicSpec{
 		name: "mosquitto_broker_publish_messages_dropped_total", kind: Counter,
 		help: "The total number of PUBLISH messages dropped due to inflight/queuing limits since the broker started.",
 	},
-	// Fix (§3.4): real counter, was exported as a Gauge.
+	// Fix: real counter, was exported as a Gauge.
 	"$SYS/broker/connections/socket/count": {
 		name: "mosquitto_broker_connections_socket_total", kind: Counter,
 		help: "The total number of socket connections opened since the broker started.",
 	},
-	// Fix (§3.4): real counter, was exported as a Gauge.
+	// Fix: real counter, was exported as a Gauge.
 	"$SYS/broker/clients/expired": {
 		name: "mosquitto_broker_clients_expired_total", kind: Counter,
 		help: "The total number of disconnected persistent clients that have been expired and removed since the broker started.",
 	},
 
-	// --- Gauges (§6.2) ---
-	// Fix (§3.4): HASH_CNT high-water/current count, was exported as a Counter.
+	// Gauges.
+	// Fix: HASH_CNT high-water/current count, was exported as a Counter.
 	"$SYS/broker/clients/total": {
-		name: "mosquitto_broker_clients_total", kind: Gauge,
+		name: "mosquitto_broker_clients", kind: Gauge,
 		help: "The number of currently connected and disconnected clients with a persistent session registered on the broker.",
 	},
 	"$SYS/broker/clients/connected": {
 		name: "mosquitto_broker_clients_connected", kind: Gauge,
 		help: "The number of currently connected clients.",
 	},
-	// Deprecated alias of clients/connected, collapsed 2→1 (§6.3).
+	// Deprecated alias of clients/connected, collapsed 2→1.
 	"$SYS/broker/clients/active": {
 		name: "mosquitto_broker_clients_connected", kind: Gauge,
 		help: "The number of currently connected clients.",
@@ -135,12 +134,12 @@ var topics = map[string]topicSpec{
 		name: "mosquitto_broker_clients_disconnected", kind: Gauge,
 		help: "The number of currently disconnected clients with a persistent session registered on the broker.",
 	},
-	// Deprecated alias of clients/disconnected, collapsed 2→1 (§6.3).
+	// Deprecated alias of clients/disconnected, collapsed 2→1.
 	"$SYS/broker/clients/inactive": {
 		name: "mosquitto_broker_clients_disconnected", kind: Gauge,
 		help: "The number of currently disconnected clients with a persistent session registered on the broker.",
 	},
-	// Fix (§3.4): running high-water mark, was exported as a Counter.
+	// Fix: running high-water mark, was exported as a Counter.
 	"$SYS/broker/clients/maximum": {
 		name: "mosquitto_broker_clients_maximum", kind: Gauge,
 		help: "The maximum number of clients that have been connected to the broker at the same time.",
@@ -149,7 +148,7 @@ var topics = map[string]topicSpec{
 		name: "mosquitto_broker_messages_stored", kind: Gauge,
 		help: "The number of messages currently held in the message store.",
 	},
-	// Duplicate of messages/stored, collapsed 2→1 (§3.4, §6.3).
+	// Duplicate of messages/stored, collapsed 2→1.
 	"$SYS/broker/store/messages/count": {
 		name: "mosquitto_broker_messages_stored", kind: Gauge,
 		help: "The number of messages currently held in the message store.",
@@ -187,13 +186,13 @@ var topics = map[string]topicSpec{
 		name: "mosquitto_broker_packet_out_bytes", kind: Gauge,
 		help: "The number of bytes pending output to the network.", unit: "By",
 	},
-	// Fix (§3.4): monotonically-reporting wall clock, was exported as a Counter.
+	// Fix: monotonically-reporting wall clock, was exported as a Counter.
 	"$SYS/broker/uptime": {
 		name: "mosquitto_broker_uptime_seconds", kind: Gauge,
 		help: "The number of seconds since the broker started.", unit: "s",
 	},
 
-	// --- load/** shape change (§6.3): 27 series -> 3, one name + a window label.
+	// --- load/** shape change: 27 series -> 3, one name + a window label.
 	// The other 8 categories (24 series) are pure EWMAs of counters already
 	// exported above and are deliberately absent from this table, so they
 	// fall through Resolve to NotExported.
@@ -218,7 +217,7 @@ var topics = map[string]topicSpec{
 }
 
 // topicVersion is handled outside the table: its payload is a version
-// string, not a number, and it renders as an info-metric (§6.2).
+// string, not a number, and it renders as an info-metric.
 const topicVersion = "$SYS/broker/version"
 
 var infoSpec = topicSpec{
@@ -229,7 +228,7 @@ var infoSpec = topicSpec{
 // Bridge connection state topics carry the admin-controlled remote_clientid
 // in the middle of the topic, so they cannot be a static map key. Sliced by
 // fixed prefix/suffix length rather than a regexp or a Split, so a client id
-// containing "/" is handled correctly without ambiguity (§6.3 bridge case).
+// containing "/" is handled correctly without ambiguity.
 const (
 	bridgeTopicPrefix = "$SYS/broker/connection/"
 	bridgeTopicSuffix = "/state"
@@ -274,8 +273,8 @@ func Instruments() []Instrument {
 }
 
 // isExcludedLoadSeries reports whether topic is one of the 24 load/** series
-// dropped by §6.3. They are pure EWMAs of counters we already export, so a
-// backend computing its own rate() gains nothing from them — but they are
+// deliberately dropped. They are pure EWMAs of counters we already export,
+// so a backend computing its own rate() gains nothing from them — but they are
 // recognised, not unknown.
 func isExcludedLoadSeries(topic string) bool {
 	const prefix = "$SYS/broker/load/"
@@ -315,7 +314,7 @@ func Resolve(topic, payload string) (Sample, Reason) {
 		// this". Both go unexported, but only the latter is worth alerting
 		// on. Folding them together makes the unknown-topic counter climb by
 		// 24 every sys_interval on a perfectly healthy broker, which buries
-		// the one signal it exists to give (§5.4).
+		// the one signal it exists to give.
 		if isExcludedLoadSeries(topic) {
 			return Sample{}, Excluded
 		}

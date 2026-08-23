@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +24,16 @@ func TestParseLogLevel(t *testing.T) {
 	}
 	if _, err := parseLogLevel("DEBUG+2"); err == nil {
 		t.Fatal("undocumented custom log level was accepted")
+	}
+}
+
+//nolint:paralleltest // temporarily overrides package-level build metadata
+func TestVersionStringOmitsEmptyCommit(t *testing.T) {
+	originalVersion, originalCommit := Version, Commit
+	t.Cleanup(func() { Version, Commit = originalVersion, originalCommit })
+	Version, Commit = "dev", ""
+	if got := versionString(); strings.Contains(got, "()") {
+		t.Fatalf("versionString() = %q, contains an empty commit", got)
 	}
 }
 
@@ -69,7 +80,7 @@ func TestNoPasswordFlag(t *testing.T) {
 	}
 }
 
-// TestNoResetMetricsFlag guards DESIGN.md §5.5/§6.5: --reset-metrics
+// TestNoResetMetricsFlag ensures --reset-metrics stays removed because it
 // fabricates counter resets on every broker flap and was removed as a
 // breaking change in v1.0.0. It must never come back.
 func TestNoResetMetricsFlag(t *testing.T) {
@@ -77,14 +88,13 @@ func TestNoResetMetricsFlag(t *testing.T) {
 	for _, flag := range newCommand(&config.FileConfig{}).Flags {
 		for _, name := range flag.Names() {
 			if name == "reset-metrics" || name == "r" {
-				t.Fatal("--reset-metrics was removed in v1.0.0 (DESIGN.md §5.5) and must not be reintroduced")
+				t.Fatal("--reset-metrics was removed in v1.0.0 and must not be reintroduced")
 			}
 		}
 	}
 }
 
-// TestSysIntervalFlag pins the DESIGN.md §7 Phase 3 item 6 default (10s) and
-// that a non-default value round-trips through the command into
+// TestSysIntervalFlag verifies that a non-default value round-trips into
 // config.Config.SysInterval.
 func TestSysIntervalFlag(t *testing.T) {
 	t.Parallel()
@@ -102,8 +112,21 @@ func TestSysIntervalFlag(t *testing.T) {
 	}
 }
 
-// TestOTLPFlagDefaults pins DESIGN.md decision 10.6: OTLP export is opt-in
-// and off by default. An empty --otlp-endpoint default means no OTLP
+func TestBindAddressDefaultsToLoopback(t *testing.T) {
+	t.Parallel()
+	for _, flag := range newCommand(&config.FileConfig{}).Flags {
+		if f, ok := flag.(*cli.StringFlag); ok && f.Name == "bind-address" {
+			if f.Value != "127.0.0.1:9234" {
+				t.Fatalf("--bind-address default = %q, want loopback", f.Value)
+			}
+			return
+		}
+	}
+	t.Fatal("--bind-address flag not found")
+}
+
+// TestOTLPFlagDefaults pins the documented configuration contract: OTLP
+// export is opt-in and off by default. An empty --otlp-endpoint means no OTLP
 // exporter is ever constructed and no OTLP network egress happens,
 // regardless of --otlp-protocol/--otlp-interval's own defaults.
 func TestOTLPFlagDefaults(t *testing.T) {
@@ -140,9 +163,8 @@ func TestOTLPFlagDefaults(t *testing.T) {
 	}
 }
 
-// TestConfigFlagExists guards the DESIGN.md §7 Phase 5 --config/CONFIG_FILE
-// surface: it must be a recognised, documented flag rather than a bare env
-// var the user has to know about.
+// TestConfigFlagExists verifies that config-file selection is a documented
+// flag rather than a bare environment variable.
 func TestConfigFlagExists(t *testing.T) {
 	t.Parallel()
 	for _, flag := range newCommand(&config.FileConfig{}).Flags {
@@ -154,7 +176,6 @@ func TestConfigFlagExists(t *testing.T) {
 }
 
 // TestConfigPrecedence table-tests the full flag/env/YAML matrix for one
-// representative setting (--endpoint), per DESIGN.md §9.10/§7 Phase 5: with
 // three independent sources, precedence must be flag > env > YAML > the
 // hardcoded default in every combination, not just the common cases.
 func TestConfigPrecedence(t *testing.T) {
@@ -214,10 +235,8 @@ func TestConfigPrecedence(t *testing.T) {
 	}
 }
 
-// TestLogEffectiveConfigRedactsPassword proves decision 10.12: the
-// resolved-config debug log must never contain the password, regardless of
-// which source it came from, while still surfacing enough (like the
-// endpoint) to be useful for diagnosing a misconfiguration.
+// TestLogEffectiveConfigRedactsPassword ensures the resolved-config debug log
+// never contains the password while retaining useful non-secret fields.
 func TestLogEffectiveConfigRedactsPassword(t *testing.T) {
 	t.Parallel()
 	const password = "s3cret-do-not-leak"

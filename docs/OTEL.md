@@ -1,14 +1,19 @@
-# OpenTelemetry metrics export
+# Experimental OpenTelemetry metrics export
+
+OTLP push export is experimental. Prometheus `/metrics` export is the
+production-supported interface. Do not depend on the OTLP path for counters
+that must remain correct across broker restarts until the reset limitation
+below is resolved.
 
 mosquitto-exporter's metrics pipeline is a single OpenTelemetry
-`MeterProvider` holding one instrument set (DESIGN.md §5.2). By default that
+`MeterProvider` holding one instrument set. By default that
 provider has exactly one reader attached: the one backing `/metrics`.
 **Prometheus scraping is unchanged and remains the default** - existing
 scrape configs need no changes, and a plain `mosquitto-exporter` process with
 no OTLP flags opens no OTLP network connection at all.
 
 OTLP push export is a second, optional reader on the same provider. It is
-opt-in and off by default (DESIGN.md decision 10.6): leaving
+opt-in and off by default: leaving
 `--otlp-endpoint`/`OTLP_ENDPOINT` unset means no OTLP exporter is ever
 constructed and no OTLP egress happens, regardless of `--otlp-protocol` or
 `--otlp-interval`.
@@ -47,8 +52,8 @@ authentication so secrets do not appear in argv.
 `/metrics` is served by `go.opentelemetry.io/otel/exporters/prometheus`,
 which is v0.67.0 in OTel's `experimental-metrics` module set - it is *not*
 covered by OTel's "metrics are stable" guarantee, and its own docs say the
-default translation strategy may change in a future release (DESIGN.md
-§5.2/§9.4). Practically, that means:
+default translation strategy may change in a future release. Practically,
+that means:
 
 - The exact exported byte format is pinned deliberately (translation
   strategy, `target_info`/`otel_scope_*` disabled) rather than left to
@@ -60,7 +65,7 @@ default translation strategy may change in a future release (DESIGN.md
 - The instruments themselves are built against the stable v1 `otel/metric`
   API; only the reader wiring touches the v0 module, confined to one file.
 
-## OTLP counter resets are a known, accepted limitation
+## OTLP counter resets are a known limitation
 
 `$SYS` values (and therefore this exporter's counters) reset to zero when
 the broker restarts. On the Prometheus leg this is harmless: classic
@@ -75,17 +80,13 @@ its `StartTime` never reset, so a broker restart produces a decreasing
 cumulative value against a fixed `StartTime`. That is spec-invalid, and a
 StartTime-aware OTLP backend may drop the point or mis-render it.
 
-**This is deliberately not engineered around.** Hand-rolling delta tracking
-to patch a secondary export path reintroduces exactly the complexity
-observable instruments exist to avoid (DESIGN.md §5.3/§9.3). If you rely on
-the OTLP leg and see this happen across a broker restart, that is expected
-behavior, not a bug in this exporter; revisit only if a specific OTLP
-backend demonstrably mis-renders it in a way that matters to you.
+For that reason the OTLP path is experimental. Use the production-supported
+Prometheus endpoint when reset-correct counters are required.
 
 ## No tracing
 
 This exporter does not emit spans, and there is no Tempo or other tracing
-backend integration (DESIGN.md §2, decision 10.5). It is a `$SYS`-polling
+backend integration. It is a `$SYS`-polling
 metrics exporter with a single incoming HTTP endpoint (`/metrics`) and no
 request to trace across services - there is nothing here for a trace to
 usefully connect. Do not expect spans from it.

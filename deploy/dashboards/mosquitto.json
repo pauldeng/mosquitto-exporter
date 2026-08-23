@@ -17,6 +17,19 @@
         "query": "prometheus",
         "current": {},
         "label": "Prometheus"
+      },
+      {
+        "name": "instance",
+        "type": "query",
+        "label": "Broker instance",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "definition": "label_values(mosquitto_up, instance)",
+        "query": { "query": "label_values(mosquitto_up, instance)", "refId": "StandardVariableQuery" },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 1,
+        "current": {}
       }
     ]
   },
@@ -27,7 +40,7 @@
       "description": "mosquitto_up: 1 while connected and the SYS-tree heartbeat is fresh, 0 the instant either fails. See the MosquittoBrokerDown alert.",
       "gridPos": { "x": 0, "y": 1, "w": 8, "h": 4 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "targets": [{ "expr": "mosquitto_up", "legendFormat": "{{instance}}", "refId": "A" }],
+      "targets": [{ "expr": "mosquitto_up{instance=~\"$instance\"}", "legendFormat": "{{instance}}", "refId": "A" }],
       "fieldConfig": {
         "defaults": {
           "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }],
@@ -41,14 +54,14 @@
       "description": "mosquitto_broker_info carries the running broker's version as a label; the sample value is always 1.",
       "gridPos": { "x": 8, "y": 1, "w": 8, "h": 4 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "targets": [{ "expr": "mosquitto_broker_info", "format": "table", "instant": true, "refId": "A" }]
+      "targets": [{ "expr": "mosquitto_broker_info{instance=~\"$instance\"}", "format": "table", "instant": true, "refId": "A" }]
     },
     {
       "id": 4, "type": "stat", "title": "Uptime (current)",
-      "description": "mosquitto_broker_uptime_seconds - a Gauge (Phase 3 fix), not a counter. Do not rate() this.",
+      "description": "mosquitto_broker_uptime_seconds is a Gauge, not a counter. Do not rate() this.",
       "gridPos": { "x": 16, "y": 1, "w": 8, "h": 4 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "targets": [{ "expr": "mosquitto_broker_uptime_seconds", "legendFormat": "{{instance}}", "refId": "A" }],
+      "targets": [{ "expr": "mosquitto_broker_uptime_seconds{instance=~\"$instance\"}", "legendFormat": "{{instance}}", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "s" } },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
     },
@@ -57,27 +70,27 @@
       "description": "Watch for a downward step: mosquitto_broker_uptime_seconds only ever decreases when the broker process restarted. See the MosquittoBrokerRestarted alert.",
       "gridPos": { "x": 0, "y": 5, "w": 24, "h": 6 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "targets": [{ "expr": "mosquitto_broker_uptime_seconds", "legendFormat": "{{instance}}", "refId": "A" }],
+      "targets": [{ "expr": "mosquitto_broker_uptime_seconds{instance=~\"$instance\"}", "legendFormat": "{{instance}}", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "s" } }
     },
 
     { "id": 10, "type": "row", "title": "Is it losing messages?", "collapsed": false, "gridPos": { "x": 0, "y": 11, "w": 24, "h": 1 }, "panels": [] },
     {
       "id": 11, "type": "timeseries", "title": "Publish Messages Dropped (rate, 5m)",
-      "description": "mosquitto_broker_publish_messages_dropped_total is a Counter; its healthy value is a constant 0 (DESIGN.md §5.3). Any sustained rate above zero is real signal.",
+      "description": "mosquitto_broker_publish_messages_dropped_total is a Counter; its healthy value is a constant 0. Any sustained rate above zero is real signal.",
       "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "targets": [{ "expr": "rate(mosquitto_broker_publish_messages_dropped_total[5m])", "legendFormat": "{{instance}}", "refId": "A" }],
+      "targets": [{ "expr": "rate(mosquitto_broker_publish_messages_dropped_total{instance=~\"$instance\"}[5m])", "legendFormat": "{{instance}}", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "cps", "min": 0 } }
     },
     {
       "id": 12, "type": "timeseries", "title": "Publish Throughput (rate, 5m)",
-      "description": "received vs sent PUBLISH messages. Fan-out means sent legitimately exceeds received - watch ratio stability, not equality (DESIGN.md §4.2).",
+      "description": "Received vs sent PUBLISH messages. Fan-out means sent legitimately exceeds received; watch ratio stability, not equality.",
       "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
-        { "expr": "rate(mosquitto_broker_publish_messages_received_total[5m])", "legendFormat": "received", "refId": "A" },
-        { "expr": "rate(mosquitto_broker_publish_messages_sent_total[5m])", "legendFormat": "sent", "refId": "B" }
+        { "expr": "rate(mosquitto_broker_publish_messages_received_total{instance=~\"$instance\"}[5m])", "legendFormat": "{{instance}} received", "refId": "A" },
+        { "expr": "rate(mosquitto_broker_publish_messages_sent_total{instance=~\"$instance\"}[5m])", "legendFormat": "{{instance}} sent", "refId": "B" }
       ],
       "fieldConfig": { "defaults": { "unit": "cps", "min": 0 } }
     },
@@ -87,9 +100,9 @@
       "gridPos": { "x": 0, "y": 20, "w": 24, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
-        { "expr": "increase(mosquitto_exporter_unknown_topics_total[10m])", "legendFormat": "unknown topics", "refId": "A" },
-        { "expr": "increase(mosquitto_exporter_dropped_topics_total[10m])", "legendFormat": "dropped (cache full)", "refId": "B" },
-        { "expr": "increase(mosquitto_exporter_invalid_payloads_total[10m])", "legendFormat": "invalid payloads", "refId": "C" }
+        { "expr": "increase(mosquitto_exporter_unknown_topics_total{instance=~\"$instance\"}[10m])", "legendFormat": "{{instance}} unknown topics", "refId": "A" },
+        { "expr": "increase(mosquitto_exporter_dropped_topics_total{instance=~\"$instance\"}[10m])", "legendFormat": "{{instance}} dropped (cache full)", "refId": "B" },
+        { "expr": "increase(mosquitto_exporter_invalid_payloads_total{instance=~\"$instance\"}[10m])", "legendFormat": "{{instance}} invalid payloads", "refId": "C" }
       ],
       "fieldConfig": { "defaults": { "unit": "short", "min": 0 } }
     },
@@ -100,7 +113,7 @@
       "gridPos": { "x": 0, "y": 29, "w": 24, "h": 3 },
       "options": {
         "mode": "markdown",
-        "content": "No latency metric exists for this broker, and none can be derived from its SYS topic tree - it publishes no timing data at all (DESIGN.md §4.2). The panels below are **saturation and backlog proxies**, not latency: growth means delivery is falling behind, not that it is slow."
+        "content": "No latency metric exists for this broker, and none can be derived from its SYS topic tree because it publishes no timing data. The panels below are **saturation and backlog proxies**, not latency: growth means delivery is falling behind, not that it is slow."
       }
     },
     {
@@ -108,7 +121,7 @@
       "description": "mosquitto_broker_packet_out_count is a Gauge: packets pending output to the network right now. A sustained upward trend means the broker cannot drain its outbound queue as fast as it fills.",
       "gridPos": { "x": 0, "y": 32, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "targets": [{ "expr": "mosquitto_broker_packet_out_count", "legendFormat": "{{instance}}", "refId": "A" }],
+      "targets": [{ "expr": "mosquitto_broker_packet_out_count{instance=~\"$instance\"}", "legendFormat": "{{instance}}", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "short", "min": 0 } }
     },
     {
@@ -116,7 +129,7 @@
       "description": "mosquitto_broker_packet_out_bytes is a Gauge, in bytes pending output right now.",
       "gridPos": { "x": 12, "y": 32, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "targets": [{ "expr": "mosquitto_broker_packet_out_bytes", "legendFormat": "{{instance}}", "refId": "A" }],
+      "targets": [{ "expr": "mosquitto_broker_packet_out_bytes{instance=~\"$instance\"}", "legendFormat": "{{instance}}", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } }
     },
     {
@@ -124,29 +137,29 @@
       "description": "mosquitto_broker_messages_stored is a Gauge counting messages currently held (including retained). Sustained growth alongside dropped/queued panels points at accumulating backlog.",
       "gridPos": { "x": 0, "y": 40, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "targets": [{ "expr": "mosquitto_broker_messages_stored", "legendFormat": "{{instance}}", "refId": "A" }],
+      "targets": [{ "expr": "mosquitto_broker_messages_stored{instance=~\"$instance\"}", "legendFormat": "{{instance}}", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "short", "min": 0 } }
     },
     {
       "id": 25, "type": "timeseries", "title": "Connection Load (moving average)",
-      "description": "mosquitto_broker_load_connections is one Gauge series carrying a window label (1m/5m/15m), not three metrics - the only load/** family kept, because its raw counter is never published anywhere else (DESIGN.md §6.3).",
+      "description": "mosquitto_broker_load_connections is one Gauge series carrying a window label (1m/5m/15m), not three metrics; it is retained because its raw counter is not published elsewhere.",
       "gridPos": { "x": 12, "y": 40, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "targets": [{ "expr": "mosquitto_broker_load_connections", "legendFormat": "{{window}}", "refId": "A" }],
+      "targets": [{ "expr": "mosquitto_broker_load_connections{instance=~\"$instance\"}", "legendFormat": "{{instance}} {{window}}", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "cps", "min": 0 } }
     },
 
     { "id": 30, "type": "row", "title": "Connections & clients", "collapsed": false, "gridPos": { "x": 0, "y": 48, "w": 24, "h": 1 }, "panels": [] },
     {
       "id": 31, "type": "timeseries", "title": "Client Counts",
-      "description": "clients_total and clients_maximum are Gauges (Phase 3 fix - both were miscast as Counters before). Never rate() any of these four series.",
+      "description": "Client counts and the maximum are Gauges. Never rate() any of these four series.",
       "gridPos": { "x": 0, "y": 49, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
-        { "expr": "mosquitto_broker_clients_connected", "legendFormat": "connected", "refId": "A" },
-        { "expr": "mosquitto_broker_clients_disconnected", "legendFormat": "disconnected", "refId": "B" },
-        { "expr": "mosquitto_broker_clients_total", "legendFormat": "total (persistent sessions)", "refId": "C" },
-        { "expr": "mosquitto_broker_clients_maximum", "legendFormat": "maximum (high-water mark)", "refId": "D" }
+        { "expr": "mosquitto_broker_clients_connected{instance=~\"$instance\"}", "legendFormat": "{{instance}} connected", "refId": "A" },
+        { "expr": "mosquitto_broker_clients_disconnected{instance=~\"$instance\"}", "legendFormat": "{{instance}} disconnected", "refId": "B" },
+        { "expr": "mosquitto_broker_clients{instance=~\"$instance\"}", "legendFormat": "{{instance}} total (persistent sessions)", "refId": "C" },
+        { "expr": "mosquitto_broker_clients_maximum{instance=~\"$instance\"}", "legendFormat": "{{instance}} maximum (high-water mark)", "refId": "D" }
       ],
       "fieldConfig": { "defaults": { "unit": "short", "min": 0 } }
     },
@@ -155,9 +168,9 @@
       "gridPos": { "x": 12, "y": 49, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
-        { "expr": "mosquitto_broker_subscriptions", "legendFormat": "subscriptions", "refId": "A" },
-        { "expr": "mosquitto_broker_shared_subscriptions", "legendFormat": "shared subscriptions", "refId": "B" },
-        { "expr": "mosquitto_broker_retained_messages", "legendFormat": "retained messages", "refId": "C" }
+        { "expr": "mosquitto_broker_subscriptions{instance=~\"$instance\"}", "legendFormat": "{{instance}} subscriptions", "refId": "A" },
+        { "expr": "mosquitto_broker_shared_subscriptions{instance=~\"$instance\"}", "legendFormat": "{{instance}} shared subscriptions", "refId": "B" },
+        { "expr": "mosquitto_broker_retained_messages{instance=~\"$instance\"}", "legendFormat": "{{instance}} retained messages", "refId": "C" }
       ],
       "fieldConfig": { "defaults": { "unit": "short", "min": 0 } }
     },
@@ -168,17 +181,17 @@
       "gridPos": { "x": 0, "y": 58, "w": 24, "h": 3 },
       "options": {
         "mode": "markdown",
-        "content": "The heap panel below is the broker's own **tracked heap allocations only** - it excludes stacks, allocator fragmentation, shared libraries and TLS buffers, so it reads lower than real process memory and is **not** a substitute for it (DESIGN.md §4.1). This exporter cannot see broker CPU or RSS at all - scrape `node_exporter` / `cAdvisor` / `process-exporter` into this same Prometheus for the real thing, joined on the `instance` label."
+        "content": "The heap panel below is the broker's own **tracked heap allocations only**. It excludes stacks, allocator fragmentation, shared libraries and TLS buffers, so it reads lower than real process memory and is **not** a substitute for it. This exporter cannot see broker CPU or RSS; scrape `node_exporter` / `cAdvisor` / `process-exporter` into this same Prometheus for the real thing, joined on the `instance` label."
       }
     },
     {
       "id": 42, "type": "timeseries", "title": "Broker Heap - tracked allocations only, NOT process memory",
-      "description": "mosquitto_broker_heap_current_bytes / heap_maximum_bytes. For real broker RSS/CPU use node_exporter / cAdvisor / process-exporter (DESIGN.md §4.1).",
+      "description": "mosquitto_broker_heap_current_bytes / heap_maximum_bytes. For real broker RSS/CPU use node_exporter / cAdvisor / process-exporter.",
       "gridPos": { "x": 0, "y": 61, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
-        { "expr": "mosquitto_broker_heap_current_bytes", "legendFormat": "current", "refId": "A" },
-        { "expr": "mosquitto_broker_heap_maximum_bytes", "legendFormat": "maximum", "refId": "B" }
+        { "expr": "mosquitto_broker_heap_current_bytes{instance=~\"$instance\"}", "legendFormat": "{{instance}} current", "refId": "A" },
+        { "expr": "mosquitto_broker_heap_maximum_bytes{instance=~\"$instance\"}", "legendFormat": "{{instance}} maximum", "refId": "B" }
       ],
       "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } }
     },
@@ -187,7 +200,7 @@
       "description": "The exporter's own process_resident_memory_bytes - never confuse this with the broker heap panel to its left.",
       "gridPos": { "x": 12, "y": 61, "w": 6, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "targets": [{ "expr": "process_resident_memory_bytes", "legendFormat": "{{instance}}", "refId": "A" }],
+      "targets": [{ "expr": "process_resident_memory_bytes{instance=~\"$instance\"}", "legendFormat": "{{instance}}", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } }
     },
     {
@@ -195,7 +208,7 @@
       "description": "rate(process_cpu_seconds_total[5m]) for the exporter process itself.",
       "gridPos": { "x": 18, "y": 61, "w": 6, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "targets": [{ "expr": "rate(process_cpu_seconds_total[5m])", "legendFormat": "{{instance}}", "refId": "A" }],
+      "targets": [{ "expr": "rate(process_cpu_seconds_total{instance=~\"$instance\"}[5m])", "legendFormat": "{{instance}}", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0 } }
     },
     {
@@ -203,7 +216,7 @@
       "description": "mosquitto_broker_bridge_connected, labelled by mosquitto_bridge_name. Empty when no bridge is configured. See the MosquittoBridgeDisconnected alert.",
       "gridPos": { "x": 0, "y": 69, "w": 24, "h": 6 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "targets": [{ "expr": "mosquitto_broker_bridge_connected", "format": "table", "instant": true, "refId": "A" }]
+      "targets": [{ "expr": "mosquitto_broker_bridge_connected{instance=~\"$instance\"}", "format": "table", "instant": true, "refId": "A" }]
     }
   ]
 }

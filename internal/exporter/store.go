@@ -9,8 +9,8 @@ import (
 )
 
 // maxTrackedTopics bounds the sample map against broker-controlled input.
-// internal/sys's static table has ~30-odd exportable metric families
-// (DESIGN.md §5.4/§6), so this is well over 30x headroom and no real
+// internal/sys's static table has about 30 exportable metric families, so
+// this is well over 30x headroom and no real
 // deployment can reach it; it exists as a backstop against a table bug or a
 // future broker version adding topics, not as a limit anyone should tune.
 //
@@ -19,22 +19,20 @@ import (
 const maxTrackedTopics = 1024
 
 // uptimeTopic is the one $SYS topic Mosquitto publishes unconditionally
-// every tick, never change-gated (DESIGN.md §4, §5.3). It is therefore the
+// every tick, never change-gated. It is therefore the
 // liveness heartbeat: Store treats its own staleness, not any other topic's,
 // as proof the broker's $SYS tree has stalled.
 const uptimeTopic = "$SYS/broker/uptime"
 
 // heartbeatMultiplier is how many sys-intervals of uptime silence, while
-// still connected, before Store reports mosquitto_up 0 (DESIGN.md §5.3).
+// still connected, before Store reports mosquitto_up 0.
 const heartbeatMultiplier = 3
 
 // cachedSample is one resolved, exportable $SYS value: the resolved sample
 // itself (name/kind/help/labels/value), plus the Desc built for it once at
 // cache time - kept only to detect two topics aliasing the same underlying
-// series (see the dedup scan in Update), never rendered directly since
-// Phase 4 (DESIGN.md §7): mosquitto_broker_* series are now rendered
-// exclusively through the OTel instruments in otelmetrics.go, which read the
-// cache via BrokerSnapshot.
+// series (see the dedup scan in Update). Broker series are rendered through
+// the OTel instruments in otelmetrics.go, which read BrokerSnapshot.
 type cachedSample struct {
 	sys.Sample
 	desc *prometheus.Desc
@@ -46,8 +44,8 @@ type cachedSample struct {
 // entry instead of creating a duplicate series.
 //
 // Every resolved sample comes from sys.Resolve, which is also what decides
-// whether a topic is exported at all (DESIGN.md §5.4's static table replaces
-// the old "any $SYS topic auto-registers a metric" behaviour):
+// whether a topic is exported at all. Its static table replaces the old
+// "any $SYS topic auto-registers a metric" behaviour:
 //
 //   - sys.OK: the value is cached (or updates an existing cache entry).
 //   - sys.Excluded: recognised but deliberately not exported (the 24 dropped
@@ -56,8 +54,8 @@ type cachedSample struct {
 //     mosquitto_exporter_unknown_topics_total, never cached per-topic, so an
 //     attacker flooding unknown $SYS topics cannot grow memory.
 //   - sys.InvalidPayload: the topic is known but the payload did not parse
-//     to a number; counted by mosquitto_exporter_invalid_payloads_total (C5:
-//     a parse failure must never look like a genuine zero reading).
+//     to a number; counted by mosquitto_exporter_invalid_payloads_total so a
+//     parse failure never looks like a genuine zero reading.
 //
 // Store is also an "unchecked" prometheus.Collector for its own self-metrics
 // only (mosquitto_up and the three mosquitto_exporter_* counters below):
@@ -82,7 +80,7 @@ type Store struct {
 }
 
 // NewStore returns an empty, ready-to-use Store. sysInterval sizes the
-// uptime heartbeat window only (DESIGN.md §5.3) - it must be positive;
+// uptime heartbeat window only - it must be positive;
 // config.Config.Validate enforces that before this is called.
 func NewStore(sysInterval time.Duration) *Store {
 	return &Store{
@@ -121,7 +119,7 @@ func (s *Store) Update(topic, payload string) {
 
 	switch reason {
 	case sys.Excluded:
-		// Recognised and deliberately dropped (§6.3). Not counted: it is not
+		// Recognised and deliberately dropped. Not counted: it is not
 		// a surprise, and counting it would make the unknown-topic counter
 		// rise forever on a healthy broker.
 		return
@@ -197,8 +195,8 @@ func (s *Store) SetConnected(v bool) {
 }
 
 // up reports whether the exporter should claim liveness: connected, and the
-// $SYS tree has produced an uptime tick within the heartbeat window
-// (DESIGN.md §5.3). Callers must hold at least a read lock.
+// $SYS tree has produced an uptime tick within the heartbeat window. Callers
+// must hold at least a read lock.
 func (s *Store) up() bool {
 	if !s.connected {
 		return false
@@ -213,11 +211,7 @@ func (s *Store) up() bool {
 func (s *Store) Describe(_ chan<- *prometheus.Desc) {}
 
 // Collect renders mosquitto_up and the exporter's own self-metric counters.
-// Since Phase 4 (DESIGN.md §7), mosquitto_broker_* series are rendered by
-// the OTel instruments in otelmetrics.go instead - see BrokerSnapshot -
-// which is what actually implements the §5.3/§5.5 "omit every broker series
-// together while down" behaviour today; Store.Collect itself no longer
-// touches s.samples.
+// Broker metrics are rendered by otelmetrics.go from BrokerSnapshot.
 func (s *Store) Collect(ch chan<- prometheus.Metric) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -236,13 +230,11 @@ func (s *Store) Collect(ch chan<- prometheus.Metric) {
 // (otelmetrics.go's callback): up reports the same
 // connection/heartbeat gate Collect uses for mosquitto_up, and samples is
 // every cached $SYS value at the instant up was computed - both read under
-// one lock so they describe the same instant (mirrors Collect's own
-// up-then-samples read; §5.8's accepted torn-read trade-off still applies
-// across the samples themselves).
+// one lock so they describe the same instant.
 //
 // When up is false, samples is nil: the caller must omit every
 // mosquitto_broker_* series together rather than report them flat or
-// zeroed (DESIGN.md §5.3/§5.5) - the absence itself is the honest signal.
+// zeroed - the absence itself is the honest signal.
 func (s *Store) BrokerSnapshot() (up bool, samples []sys.Sample) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

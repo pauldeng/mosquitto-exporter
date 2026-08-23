@@ -16,10 +16,13 @@
 # never carries a secret. LoadFile rejects a "password" key outright.
 
 # Endpoint for the Mosquitto message broker.
+# Credentials are rejected on plaintext TCP/WebSocket connections; use a TLS
+# scheme (for example ssl://) or a local unix:// socket when setting user/password.
 # endpoint: tcp://127.0.0.1:1883
 
-# Listen address for the /metrics HTTP endpoint.
-# bind_address: 0.0.0.0:9234
+# Listen address for the /metrics HTTP endpoint. Bind to 0.0.0.0 only on a
+# trusted monitoring network or behind an authenticating reverse proxy.
+# bind_address: 127.0.0.1:9234
 
 # Username for the Mosquitto message broker. Empty means no username.
 # user: ""
@@ -56,10 +59,11 @@
 # sys_interval.
 # sys_interval: 10s
 
-# OTLP receiver endpoint to push metrics to (e.g. localhost:4317 for grpc,
+# EXPERIMENTAL: OTLP receiver endpoint to push metrics to (e.g. localhost:4317 for grpc,
 # http://localhost:4318 for http). Empty (the default) disables OTLP
 # export entirely - no exporter is built and no OTLP network egress
 # happens. Prometheus scraping via /metrics is always on and unaffected.
+# Broker counter resets are not yet represented correctly on the OTLP path.
 # otlp_endpoint: ""
 
 # OTLP wire protocol to use when otlp_endpoint is set: grpc or http.

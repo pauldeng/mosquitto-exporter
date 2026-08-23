@@ -1,23 +1,17 @@
 package exporter
 
-// otlp.go wires the opt-in OTLP push reader (DESIGN.md §5.2's diagram,
-// §7 Phase 4 item 5): a second, independent metric.Reader on the same
-// MeterProvider as the Prometheus reader in otelprom.go, so the same
-// instruments feed both. Off by default - newOTLPReader is only called when
-// config.Config.OTLPEndpoint is non-empty (server.go), so a default install
-// opens no OTLP network connection at all.
+// otlp.go wires an opt-in OTLP push reader into the same MeterProvider as
+// the Prometheus reader. It is off by default and remains experimental until
+// broker counter resets can be represented with a correct StartTime.
 //
-// §9.3 / decision: $SYS counters reset to zero on every broker restart.
+// $SYS counters reset to zero on every broker restart.
 // Classic Prometheus exposition carries no StartTime, so a decrease just
 // looks like an ordinary counter reset and rate() handles it exactly as it
 // does today. OTLP cumulative Sums are spec-invalid under that same reset
 // (StartTime never advances), and a StartTime-aware backend may drop or
-// mis-render the point. This is a known, accepted limitation - see
+// mis-render the point. This is a known limitation - see
 // sdk/metric/internal/aggregate/sum.go's precomputedSum, which performs no
-// monotonicity or reset validation - and is deliberately not engineered
-// around: hand-rolling delta tracking to patch a secondary export path
-// reintroduces exactly the complexity observable instruments exist to
-// avoid.
+// monotonicity or reset validation. See docs/OTEL.md.
 
 import (
 	"context"
@@ -32,8 +26,7 @@ import (
 )
 
 // otlpDialTimeout bounds building the OTLP exporter at startup so an
-// unreachable collector can never delay /metrics from serving (DESIGN.md
-// §5.5's "serve first" applies here too, even though this reader is opt-in).
+// unreachable collector cannot delay /metrics indefinitely.
 const otlpDialTimeout = 5 * time.Second
 
 // newOTLPReader builds the opt-in PeriodicReader push path from cfg. Callers

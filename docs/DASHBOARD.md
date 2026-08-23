@@ -1,16 +1,20 @@
 # Grafana dashboard and Prometheus alerts
 
-Two files, both CI-linted (`.github/workflows/ci.yaml`, `dashboard-alerts` job):
+Two files, CI-linted in `.github/workflows/ci.yaml`'s `dashboard-alerts` job.
+The job runs `promtool check rules`, `promtool check metrics`, parses the
+dashboard JSON, and checks its metric names against the implementation:
 
 - `deploy/dashboards/mosquitto.json` - a Grafana dashboard using the exact
-  DESIGN.md §6 metric names. Import it directly (Dashboards -> New -> Import
-  -> Upload JSON) and point the `datasource` variable at your Prometheus.
+  exported metric names. Import it directly (Dashboards -> New -> Import
+  -> Upload JSON), point the `datasource` variable at your Prometheus, and
+  select one or more broker targets with the `instance` variable. Every
+  panel query and legend carries that instance filter.
 - `deploy/alerts/mosquitto.rules.yaml` - 9 Prometheus alerting rules, checked
   with `promtool check rules` in CI and locally via
   `docker run --rm --entrypoint promtool -v "$PWD/deploy/alerts/mosquitto.rules.yaml:/rules.yaml:ro" prom/prometheus:v3.9.1 check rules /rules.yaml`.
   Adjust the `job="mosquitto"` label in `MosquittoExporterScrapeFailed` to
   match your own scrape config - this exporter deliberately does not invent
-  its own identity label (DESIGN.md §4.1).
+  its own identity label.
 
 ## Dashboard layout
 
@@ -25,14 +29,14 @@ would ask them:
    all of which read a constant 0 on a healthy, fully-recognised broker.
 3. **Is it backing up?** - `mosquitto_broker_packet_out_{count,bytes}` and
    `mosquitto_broker_messages_stored`, explicitly labelled as saturation
-   proxies. There is no latency metric and none can exist (DESIGN.md §4.2);
+   proxies. There is no latency metric and none can be derived from `$SYS`;
    this row does not pretend otherwise.
 4. **Connections & clients** - the client-count gauges and subscription
    counts.
 5. **Broker heap (not memory) & exporter self-health** - `heap_current`/
    `heap_maximum` labelled explicitly as broker heap, not process memory,
    with a text panel pointing at `node_exporter`/`cAdvisor`/`process-exporter`
-   for real broker CPU/RSS (DESIGN.md §4.1); the exporter's own
+   for real broker CPU/RSS; the exporter's own
    `process_resident_memory_bytes`/`process_cpu_seconds_total`; and bridge
    connectivity.
 
@@ -50,13 +54,13 @@ would ask them:
 | `MosquittoInvalidPayloadsDetected` | `increase(invalid_payloads_total[10m]) > 0` for 5m | warning |
 | `MosquittoBridgeDisconnected` | `bridge_connected == 0` for 5m | warning |
 
-Deliberately no per-series `absent()` alerts: per DESIGN.md §5.3, a
+Deliberately no per-series `absent()` alerts: a
 disconnected exporter or a stalled `$SYS` heartbeat takes every
 `mosquitto_broker_*` series absent together, so an `absent()` alert per
 series would fire ~28 times for one cause. `MosquittoBrokerDown` is the one
 alert for that failure mode.
 
-## Verified broker-version caveat: three §6 metrics need Mosquitto >= 2.1
+## Verified broker-version caveat: three metrics need Mosquitto >= 2.1
 
 Cross-checking the dashboard and alert rules against a live broker's real
 `/metrics` output (this repo's own dev host, Mosquitto 2.0.22) turned up a
@@ -71,15 +75,12 @@ several `$SYS` publish ticks. Diffing `src/sys_tree.c` between the
 generic `metrics[]` table as part of its internal rewrite, and that table is
 where these three topics (`$SYS/broker/connections/socket/count`,
 `$SYS/broker/packet/out/{count,bytes}`) were first declared. They do not
-exist in 2.0.x's older global-counter code path at all - DESIGN.md's claim
-that the two versions' `$SYS` topic sets are byte-for-byte identical does
-not hold for these three.
+exist in 2.0.x's older global-counter code path at all.
 
 Practical effect: on a Mosquitto 2.0.x broker these three series will never
 appear on `/metrics`, by design of the broker rather than a bug in the
 exporter or this dashboard - they are absent, not zero, exactly like any
-other never-observed topic (DESIGN.md §5.3). On a 2.1+ broker they behave as
-documented in §6. The dashboard and `MosquittoOutboundQueueGrowing` still
-reference them under the instruction to use the exact §6 names; this note
+other never-observed topic. On a 2.1+ broker they behave as documented. The
+dashboard and `MosquittoOutboundQueueGrowing` still reference them; this note
 exists so a 2.0.x operator seeing permanently-empty panels for these three
 series knows it is expected, not a misconfiguration.

@@ -1,12 +1,5 @@
 package exporter
 
-// Phase 0 safety net, since updated for Phase 1 and Phase 3: these tests
-// pinned Phase 0's behaviour (bugs included); Phase 1 replaced the global
-// counterMetrics/gaugeMetrics maps and per-topic dynamic registration with
-// the Store type (store.go); Phase 3 rebuilt Store around sys.Resolve and
-// the static export table (DESIGN.md §5.3/§5.4/§6). See DESIGN.md §7 for the
-// phase-by-phase defect IDs (C1-C6) referenced in comments below.
-
 import (
 	"context"
 	"flag"
@@ -67,9 +60,8 @@ func resetStore(s *Store) {
 // /metrics from it, and returns the deterministic subset of the body
 // matching names. A private registry (not the default one) is fine here
 // since none of TestStore needs process_*/go_* alongside it.
-//
-// Since Phase 4 (DESIGN.md §7), Store.Collect only renders mosquitto_up and
-// the mosquitto_exporter_* self-metric counters - mosquitto_broker_* series
+// Store.Collect exposes only mosquitto_up and the mosquitto_exporter_*
+// self-metric counters. mosquitto_broker_* series
 // are rendered by the OTel instruments in otelmetrics.go instead, so tests
 // that need those must read Store.BrokerSnapshot directly (see findSample)
 // rather than going through renderStore.
@@ -100,7 +92,7 @@ func findSample(t *testing.T, samples []sys.Sample, name string) sys.Sample {
 
 // TestStore covers Store's behaviour directly: sys.Resolve wiring
 // (OK/NotExported/InvalidPayload), the topic cache cap, and the connection
-// lifecycle (DESIGN.md §5.3/§5.4).
+// lifecycle.
 func TestStore(t *testing.T) {
 	t.Parallel()
 
@@ -118,7 +110,6 @@ func TestStore(t *testing.T) {
 			t.Errorf("got:\n%s\nwant mosquitto_up 1", got)
 		}
 
-		// Since Phase 4, mosquitto_broker_* values live in the cache exposed
 		// via BrokerSnapshot, not in Store's own Prometheus rendering.
 		up, samples := s.BrokerSnapshot()
 		if !up {
@@ -132,7 +123,7 @@ func TestStore(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid payload is counted, not recorded (C5)", func(t *testing.T) {
+	t.Run("invalid payload is counted, not recorded", func(t *testing.T) {
 		t.Parallel()
 		s := NewStore(10 * time.Second)
 		s.Update("$SYS/broker/bytes/received", "garbage")
@@ -151,15 +142,15 @@ func TestStore(t *testing.T) {
 		_, cached := s.samples["$SYS/broker/bytes/received"]
 		s.mu.RUnlock()
 		if cached {
-			t.Error("a topic that never parsed must never produce a cached sample (C5)")
+			t.Error("a topic that never parsed must never produce a cached sample")
 		}
 	})
 
 	t.Run("unknown topic is counted, not recorded", func(t *testing.T) {
 		t.Parallel()
 		s := NewStore(10 * time.Second)
-		// A topic never in the static export table (DESIGN.md §5.4): removed
-		// in real Mosquitto since 1.5 (§3.4) but historically special-cased.
+		// A topic never in the static export table: removed
+		// in real Mosquitto since 1.5 but historically special-cased.
 		s.Update("$SYS/broker/timestamp", "Thu Jan 01 1970")
 		s.Update("$SYS/broker/does/not/exist", "1")
 
@@ -173,7 +164,7 @@ func TestStore(t *testing.T) {
 		}
 	})
 
-	t.Run("dropped load/** series are not exported (DESIGN.md §6.3, decision 10.4)", func(t *testing.T) {
+	t.Run("dropped load/** series are not exported", func(t *testing.T) {
 		t.Parallel()
 		s := NewStore(10 * time.Second)
 		// Only load/connections is kept; the other 8 load/** families (24
@@ -188,13 +179,13 @@ func TestStore(t *testing.T) {
 		// Deliberately dropped, so NOT counted as unknown: these arrive every
 		// sys_interval on a healthy broker, and counting them would make
 		// mosquitto_exporter_unknown_topics_total climb by 24 per tick,
-		// burying the one signal it exists to give (§5.4).
+		// burying the one signal it exists to give.
 		if s.unknownTopics != 0 {
 			t.Errorf("unknownTopics = %d after a deliberately dropped series, want 0", s.unknownTopics)
 		}
 	})
 
-	t.Run("aliased topics collapse to one series, not a duplicate (DESIGN.md §6.2, 2->1)", func(t *testing.T) {
+	t.Run("aliased topics collapse to one series, not a duplicate", func(t *testing.T) {
 		t.Parallel()
 		s := NewStore(10 * time.Second)
 		s.SetConnected(true)
@@ -241,7 +232,7 @@ func TestStore(t *testing.T) {
 		}
 	})
 
-	t.Run("SetConnected(false) reports mosquitto_up 0 and omits broker_* series (§5.3)", func(t *testing.T) {
+	t.Run("SetConnected(false) reports mosquitto_up 0 and omits broker_* series", func(t *testing.T) {
 		t.Parallel()
 		s := NewStore(10 * time.Second)
 		s.SetConnected(true)
@@ -286,7 +277,7 @@ func TestStore(t *testing.T) {
 		}
 	})
 
-	t.Run("cache is capped, but an already-tracked topic keeps updating (DESIGN.md §5.4)", func(t *testing.T) {
+	t.Run("cache is capped, but an already-tracked topic keeps updating", func(t *testing.T) {
 		t.Parallel()
 		s := NewStore(10 * time.Second)
 
@@ -332,7 +323,7 @@ func TestStore(t *testing.T) {
 	})
 }
 
-// TestStore_HeartbeatStallReportsDown is the §5.3 stall-detection proof:
+// TestStore_HeartbeatStallReportsDown verifies heartbeat stall detection:
 // connected, but $SYS/broker/uptime has not advanced for 3x sys-interval, so
 // the broker's $SYS tree is treated as stalled and reported down. Uses
 // testing/synctest so the 3x sys-interval wait is instant and deterministic
@@ -387,8 +378,8 @@ func TestStore_HeartbeatStallRecovers(t *testing.T) {
 	})
 }
 
-// TestStore_UnchangingTopicKeepsReporting is the DESIGN.md §5.3 regression
-// test explicitly required by the exporter's staleness contract: it fails
+// TestStore_UnchangingTopicKeepsReporting is the staleness regression test:
+// it fails
 // under a per-topic recency rule (an earlier, wrong draft) and passes under
 // connection-state gating. A healthy broker is change-gated - a
 // legitimately constant value (e.g. publish_messages_dropped sitting at 0)
@@ -429,10 +420,9 @@ func TestStore_UnchangingTopicKeepsReporting(t *testing.T) {
 
 // goldenMessages is the fixed set of $SYS messages fed through
 // sharedStore.Update for TestMetricsGolden. Chosen to cover every category
-// of Phase 3 change (DESIGN.md §6): an unchanged counter and gauge, all four
-// Counter<->Gauge reclassifications (§3.4), the messages_stored alias
-// collapse (2->1, §6.2), the load/connections window-label shape change
-// (§6.3), the new mosquitto_broker_info metric (version was previously
+// Counter<->Gauge reclassifications, the messages_stored alias
+// collapse (2->1, ), the load/connections window-label shape change
+// This also covers the new mosquitto_broker_info metric (version was previously
 // ignored entirely), a topic among the 24 dropped load/** series, and a
 // topic that no longer exists on a real broker (feeds
 // mosquitto_exporter_unknown_topics_total instead of silently vanishing).
@@ -442,7 +432,7 @@ var goldenMessages = []struct {
 }{
 	{"$SYS/broker/bytes/received", "1024"},             // counter, unchanged
 	{"$SYS/broker/messages/sent", "50"},                // counter, unchanged
-	{"$SYS/broker/clients/total", "3"},                 // was Counter -> Gauge (§3.4)
+	{"$SYS/broker/clients/total", "3"},                 // was Counter -> Gauge
 	{"$SYS/broker/uptime", "12345"},                    // was Counter -> Gauge; also the heartbeat
 	{"$SYS/broker/clients/connected", "2"},             // gauge, unchanged
 	{"$SYS/broker/retained messages/count", "7"},       // gauge; awkward literal space in topic
@@ -450,11 +440,11 @@ var goldenMessages = []struct {
 	{"$SYS/broker/load/connections/1min", "0.25"},      // shape change: window="1m" label
 	{"$SYS/broker/messages/stored", "42"},              // alias pair, half A
 	{"$SYS/broker/store/messages/count", "42"},         // alias pair, half B -> must collapse to 1 series
-	{"$SYS/broker/connections/socket/count", "9"},      // was Gauge -> Counter (§3.4)
-	{"$SYS/broker/clients/expired", "1"},               // was Gauge -> Counter (§3.4)
+	{"$SYS/broker/connections/socket/count", "9"},      // was Gauge -> Counter
+	{"$SYS/broker/clients/expired", "1"},               // was Gauge -> Counter
 	{"$SYS/broker/version", "mosquitto version 2.1.2"}, // new: mosquitto_broker_info (was ignored)
 	{"$SYS/broker/load/messages/received/1min", "5.0"}, // one of the 24 dropped load/** series
-	{"$SYS/broker/timestamp", "Thu Jan 01 1970"},       // no longer exists on a real broker (§3.4)
+	{"$SYS/broker/timestamp", "Thu Jan 01 1970"},       // no longer exists on a real broker
 }
 
 // goldenMetricNames lists the metric names goldenMessages (plus the fixed
@@ -464,7 +454,7 @@ var goldenMessages = []struct {
 var goldenMetricNames = map[string]bool{
 	"mosquitto_broker_bytes_received_total":     true,
 	"mosquitto_broker_messages_sent_total":      true,
-	"mosquitto_broker_clients_total":            true,
+	"mosquitto_broker_clients":                  true,
 	"mosquitto_broker_uptime_seconds":           true,
 	"mosquitto_broker_clients_connected":        true,
 	"mosquitto_broker_retained_messages":        true,
@@ -526,9 +516,8 @@ func filterMetricFamilies(body string, names map[string]bool) string {
 	return out.String()
 }
 
-// TestMetricsGolden builds the exact production pipeline (DESIGN.md §7
-// Phase 4) - a fresh Store and client_golang's process/Go collectors
-// (§6.4) alongside the OTel MeterProvider and Prometheus reader from
+// TestMetricsGolden builds the exact production pipeline alongside the OTel
+// MeterProvider and Prometheus reader from
 // otelprom.go/otelmetrics.go, all in one registry, exactly as Run wires
 // them in server.go - feeds it a fixed set of injected messages, and
 // compares the deterministic mosquitto_-derived series against a golden
@@ -537,7 +526,7 @@ func filterMetricFamilies(body string, names map[string]bool) string {
 //
 // It also asserts (without pinning volatile values) that at least one
 // process_* and one go_* series is present, so their loss in a later phase
-// fails CI instead of shipping silently (DESIGN.md §6.4).
+// fails CI instead of shipping silently.
 //
 // Uses its own local Store and registry rather than sharedStore/the default
 // registry, so - unlike TestProcessUpdate_Race and BenchmarkProcessUpdate -
@@ -581,12 +570,12 @@ func TestMetricsGolden(t *testing.T) {
 	if !strings.Contains(body, "\ngo_") && !strings.HasPrefix(body, "go_") {
 		t.Error("no go_* series in /metrics output - lost exporter self-metrics")
 	}
-	// The 24 dropped load/** series (DESIGN.md §6.3, decision 10.4) must
+	// The 24 dropped load/** series must
 	// never appear, under any name derived from that topic.
 	if strings.Contains(body, "load_messages_received") {
 		t.Error("a deliberately dropped load/** topic produced a series")
 	}
-	// The alias pair must render as exactly one series (DESIGN.md §6.2).
+	// The alias pair must render as exactly one series.
 	if n := strings.Count(body, "# TYPE mosquitto_broker_messages_stored "); n != 1 {
 		t.Errorf("mosquitto_broker_messages_stored TYPE line appears %d times, want 1", n)
 	}
@@ -649,73 +638,8 @@ func TestBrokerMetricUnits(t *testing.T) {
 	}
 }
 
-// TestProcessUpdate_Race proves C1 and C2 are fixed (DESIGN.md §3.1): a
-// feeder goroutine calling Store.Update concurrently with a scraper
-// rendering /metrics (which calls Store.Collect) and reading
-// Store.BrokerSnapshot (which - since Phase 4 - is what actually ranges
-// over the samples map that C1/C2 were originally about; Collect itself no
-// longer touches it) and a connection-state flapper calling
-// Store.SetConnected - simulating paho's OnConnect / OnConnectionLost
-// callbacks in production. All three now go through the same sync.RWMutex
-// in store.go.
-//
-// Captured `go test -race -run TestProcessUpdate_Race` output from Phase 0,
-// before this fix, 2026-08-23 (trimmed to 2 of the 8 WARNING blocks plus the
-// fatal crash - the full 388-line capture is quoted in full in the Phase 0
-// handoff report):
-//
-//	==================
-//	WARNING: DATA RACE
-//	Read at 0x00c0001280a8 by goroutine 23:
-//	  github.com/sapcc/mosquitto-exporter.(*MosquittoCounter).Collect()
-//	      mosquitto_counter.go:38 +0x47
-//	  github.com/prometheus/client_golang/prometheus.(*Registry).Gather.func1()
-//	      .../prometheus/registry.go:456 +0x12a
-//
-//	Previous write at 0x00c0001280a8 by goroutine 13:
-//	  github.com/sapcc/mosquitto-exporter.(*counter).Set()
-//	      mosquitto_counter.go:50 +0x16c
-//	  github.com/sapcc/mosquitto-exporter.(*MosquittoCounter).Set()
-//	      mosquitto_counter.go:25 +0x162
-//	  github.com/sapcc/mosquitto-exporter.resetMetrics()
-//	      main.go:127 +0x117
-//	  github.com/sapcc/mosquitto-exporter.TestProcessUpdate_Race.func4()
-//	      main_test.go:373 +0x88
-//	==================                                    <- proves C1
-//	==================
-//	WARNING: DATA RACE
-//	Write at 0x00c0001a65d0 by goroutine 11:
-//	  runtime.mapassign_faststr()
-//	  github.com/sapcc/mosquitto-exporter.processCounterMetric()
-//	      main.go:251 +0x2e9
-//	  github.com/sapcc/mosquitto-exporter.processUpdate()
-//	      main.go:229 +0xc6
-//
-//	Previous read at 0x00c0001a65d0 by goroutine 13:
-//	  runtime.mapIterStart()
-//	  github.com/sapcc/mosquitto-exporter.resetMetrics()
-//	      main.go:125 +0x67
-//	==================                                    <- proves C2
-//	[... 6 more WARNING: DATA RACE blocks omitted, same two shapes ...]
-//	fatal error: concurrent map read and map write
-//
-//	goroutine 11 [running]:
-//	internal/runtime/maps.fatal(...)
-//	github.com/sapcc/mosquitto-exporter.resetMetrics()
-//		main.go:131 +0x247
-//	github.com/sapcc/mosquitto-exporter.TestProcessUpdate_Race.func4()
-//		main_test.go:373 +0x89
-//	FAIL	github.com/sapcc/mosquitto-exporter	0.088s
-//
-// The fatal crash (not just a WARNING) is C2 exactly as documented in
-// DESIGN.md §3.1: "Concurrent map read+write is a fatal runtime throw, not
-// merely a race." Phase 1 replaced the racy globals with Store's
-// mutex-guarded map, so this test is unskipped and passes under -race - see
-// the verification output in the Phase 1 handoff report.
-//
-// Not parallel: the entire point of this test is concurrent access to
-// shared state from three goroutines at once, so running it alongside other
-// tests would only add unrelated noise to what it's proving.
+// TestProcessUpdate_Race exercises message updates, scrapes, snapshots, and
+// connection changes concurrently. They must all remain safe under -race.
 //
 //nolint:paralleltest // deliberately concurrent against shared state, see comment above
 func TestProcessUpdate_Race(t *testing.T) {
@@ -732,8 +656,7 @@ func TestProcessUpdate_Race(t *testing.T) {
 	time.AfterFunc(duration, func() { close(done) })
 	var wg sync.WaitGroup
 
-	// Feeder: repeatedly creates brand-new topics (forces map writes, not
-	// just updates) and updates an existing counter (drives C1).
+	// Feeder repeatedly updates the store while the other goroutines read it.
 	wg.Go(func() {
 		i := 0
 		for {
@@ -748,9 +671,7 @@ func TestProcessUpdate_Race(t *testing.T) {
 		}
 	})
 
-	// Scraper: repeatedly renders /metrics (Store.Collect) and reads
-	// BrokerSnapshot (which ranges over the samples map, the C1/C2 map
-	// itself), both concurrently with the feeder's Update calls.
+	// Scraper repeatedly renders /metrics and snapshots broker metrics.
 	wg.Go(func() {
 		for {
 			select {
@@ -783,13 +704,8 @@ func TestProcessUpdate_Race(t *testing.T) {
 	wg.Wait()
 }
 
-// BenchmarkProcessUpdate measures the steady-state hot path: an already-seen
-// topic receiving a new value. This is what every message after the first
-// hits. Per DESIGN.md §3.5 (P1), Phase 0's version still compiled a fresh
-// regexp on every single call via parseValue; Phase 1 hoisted that regexp
-// (and parseTopic's replacer, P2) to package-level vars, now owned by
-// internal/sys. Baseline numbers recorded in the Phase 0 handoff report
-// (3.8 µs/op, 37 allocs/op) are the no-regression reference for gate G6.
+// BenchmarkProcessUpdate measures the steady-state hot path for already-seen
+// topics receiving new values.
 func BenchmarkProcessUpdate(b *testing.B) {
 	resetStore(sharedStore)
 	b.Cleanup(func() { resetStore(sharedStore) })

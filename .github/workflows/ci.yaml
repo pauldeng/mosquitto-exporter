@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_call:
   pull_request:
   push:
     branches:
@@ -17,8 +18,8 @@ jobs:
       matrix:
         go: ["1.25", "1.26", "1.27"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: ${{ matrix.go }}
       - run: go build -mod=readonly ./...
@@ -28,9 +29,7 @@ jobs:
           go test -mod=readonly -race -coverprofile=coverage.out ./... | tee pkgcov.txt
           go tool cover -func=coverage.out | tee coverage.txt
           awk '$1 == "total:" { sub(/%/, "", $3); if ($3 + 0 < 70) { print "total coverage below 70%"; exit 1 } }' coverage.txt
-          # Per-package floors from DESIGN.md 8 G2. The total alone is not
-          # enough: internal/sys once sat at 42.9% while the total passed,
-          # because its tests had drifted into another package.
+          # Per-package floors keep weak packages from hiding behind the total.
           awk '
             /coverage:/ {
               pkg = $2; for (i = 1; i <= NF; i++) if ($i == "coverage:") { cov = $(i+1); sub(/%/, "", cov) }
@@ -46,30 +45,30 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           check-latest: true
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          version: latest
+          version: v2.13.1
 
   govulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           check-latest: true
-      - uses: golang/govulncheck-action@v1
+      - uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1
 
   fuzz:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           check-latest: true
@@ -78,8 +77,8 @@ jobs:
   integration:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           check-latest: true
@@ -104,7 +103,7 @@ jobs:
   logs-config:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: validate OpenTelemetry Collector config
         run: docker run --rm -e MOSQUITTO_INSTANCE=test -v "$PWD/deploy/otelcol-contrib.yaml:/etc/otelcol.yaml:ro" otel/opentelemetry-collector-contrib:0.159.0@sha256:1f2c54a30e713fac6b3ae77a1ec84010c2007e29ced8ec666214fc2f6739c1cc validate --config=file:/etc/otelcol.yaml
       - name: validate Grafana Alloy config
@@ -113,13 +112,22 @@ jobs:
   dashboard-alerts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: promtool check rules
         run: docker run --rm --entrypoint promtool -v "$PWD/deploy/alerts/mosquitto.rules.yaml:/rules.yaml:ro" prom/prometheus:v3.9.1@sha256:1f0f50f06acaceb0f5670d2c8a658a599affe7b0d8e78b898c1035653849a702 check rules /rules.yaml
+      - name: promtool check metrics
+        run: docker run --rm -i --entrypoint promtool prom/prometheus:v3.9.1@sha256:1f0f50f06acaceb0f5670d2c8a658a599affe7b0d8e78b898c1035653849a702 check metrics < internal/exporter/testdata/metrics.golden
       # No dashboard-linter dependency for one dashboard: a JSON parse plus a
       # check that every mosquitto_*/process_* series the dashboard and the
-      # alert rules query actually exists in DESIGN.md §6 (see
+      # alert rules query actually exists in the implementation (see
       # deploy/alerts/check_metric_names.py) catches the realistic failure -
       # a typo'd metric name - without pulling in an extra tool for it.
       - name: validate dashboard JSON and cross-check metric names
         run: python3 deploy/alerts/check_metric_names.py
+
+  release-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: validate GoReleaser config
+        run: docker run --rm -v "$PWD:/repo:ro" -w /repo goreleaser/goreleaser:v2.17.1@sha256:1098a0be4da1780f9616a85f4c5050447b53e3e74804d8017ec1e2bbb1fb697a check

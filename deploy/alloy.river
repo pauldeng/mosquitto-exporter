@@ -1,9 +1,8 @@
 // Grafana Alloy pipeline: ship mosquitto.log to Loki.
 //
 // Equivalent to deploy/otelcol-contrib.yaml - see that file's header and
-// ../docs/LOGS.md for the full rationale (mosquitto-exporter DESIGN.md
-// §5.6, §4, §4.2, §2). Pick ONE of the two deploy/ configs, not both -
-// docs/LOGS.md explains which to choose.
+// ../docs/LOGS.md for the full rationale. Pick ONE of the two deploy/
+// configs; docs/LOGS.md explains which to choose.
 //
 // This is a FILE tailer. In Docker/Kubernetes, mosquitto's stdout is
 // already collected by the container runtime - don't point loki.source.file
@@ -20,8 +19,8 @@
 local.file_match "mosquitto" {
 	path_targets = [{
 		__path__ = "/var/log/mosquitto/mosquitto.log",
-		// Correlates these logs with this exporter's metrics in Grafana. Per
-		// DESIGN.md §4.1, target identity belongs in scrape/collector config,
+		// Correlates these logs with this exporter's metrics in Grafana. Target
+		// identity belongs in scrape/collector config,
 		// not invented by an exporter - the same rule applies here. Set this
 		// to whatever `instance` label your Prometheus scrape config already
 		// assigns to this broker/exporter pair. See docs/LOGS.md "Correlating

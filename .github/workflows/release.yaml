@@ -5,31 +5,42 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: read
+
 jobs:
-  build:
+  quality:
+    uses: ./.github/workflows/ci.yaml
+    permissions:
+      contents: read
+
+  release:
+    needs: quality
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      - uses: actions/setup-go@v5
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          # Decision 10.3: go.mod stays at 1.25 so the module doesn't force a
-          # toolchain bump on consumers, but release binaries are built with
-          # the newest tested Go (1.27) to ship its full benefit.
-          go-version: '1.27'
-      - run: go mod verify
-      - run: go test -mod=readonly -v ./...
-      - uses: docker/login-action@v3
+          # Keep module compatibility at Go 1.25 while building release
+          # binaries with the newest version covered by CI.
+          go-version: '1.27.0'
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: v1.51.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
-      - uses: goreleaser/goreleaser-action@v6
-        if: success() && startsWith(github.ref, 'refs/tags/')
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
-          version: latest
+          version: v2.17.1
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

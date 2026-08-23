@@ -7,13 +7,13 @@ package exporter
 // translation-strategy type. Every instrument is declared against the
 // stable v1 otel/metric API in otelmetrics.go instead, so a breaking change
 // in this experimental module is a contained compile error in this one
-// file, not a diffuse refactor (DESIGN.md §5.2/§9.4).
+// file, not a diffuse refactor.
 //
 // UnderscoreEscapingWithoutSuffixes is pinned explicitly rather than left at
 // the package default: the exporter's own WithTranslationStrategy doc says
 // that default is planned to change in a future release, and our instrument
 // names (otelmetrics.go) are already the final Prometheus names complete
-// with their _total/_seconds/_bytes suffixes (DESIGN.md §6) - any
+// with their _total/_seconds/_bytes suffixes - any
 // suffix-adding strategy would double them into
 // e.g. mosquitto_broker_bytes_received_total_total. WithoutTargetInfo and
 // WithoutScopeInfo are likewise required: without them target_info and
@@ -28,9 +28,8 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
-// newPrometheusReader builds the pull-based OTel reader behind /metrics
-// (DESIGN.md §5.2's diagram), registering itself into registry alongside
-// Store and client_golang's process/Go collectors (§6.4).
+// newPrometheusReader builds the pull-based OTel reader behind /metrics and
+// registers it alongside Store and client_golang's process/Go collectors.
 func newPrometheusReader(registry *prometheus.Registry) (sdkmetric.Reader, error) {
 	reader, err := otelprometheus.New(
 		otelprometheus.WithRegisterer(registry),

@@ -1,11 +1,9 @@
 # Migrating to v1.0.0
 
-v1.0.0 is a breaking release. It renames every metric this exporter
-produces, fixes five wrong Prometheus types, collapses three duplicate
-series, drops 24 redundant `load/**` series, changes one CLI default, and
-removes one flag. See [`DESIGN.md`](../DESIGN.md) §6 for the full rationale
-(not shipped in this repo checkout by default - ask whoever ran the
-modernization for a copy if you need the "why", not just the "what").
+v1.0.0 is a breaking release. It renames every broker-derived metric, fixes
+five wrong Prometheus types, collapses three duplicate series, drops 24
+redundant `load/**` series, changes two CLI defaults, and removes one flag.
+The existing `process_*` and `go_*` exporter self-metrics keep their names.
 
 This document is the "what to change" checklist. Read the whole thing before
 upgrading a production instance: dashboards, alerts, and any `--reset-metrics`
@@ -13,7 +11,7 @@ or bare `--pass`/embedded-URL-credential usage all need action.
 
 ## 1. Metric name and type changes
 
-Every metric is renamed. The table below is the complete mapping. "Type"
+Every broker-derived metric is renamed. The table below is the complete mapping. "Type"
 notes where a Prometheus type actually changed, not just the name - a type
 change means `rate()`/`irate()` queries against the old name were producing
 meaningless numbers and must not be ported forward unchanged.
@@ -38,7 +36,7 @@ meaningless numbers and must not be ported forward unchanged.
 
 | New name | Old name | Type change |
 |---|---|---|
-| `mosquitto_broker_clients_total` | `broker_clients_total` | **Counter -> Gauge** (`rate()` on the old series was already meaningless) |
+| `mosquitto_broker_clients` | `broker_clients_total` | **Counter -> Gauge** (`rate()` on the old series was already meaningless) |
 | `mosquitto_broker_clients_connected` | `broker_clients_connected` | - |
 | `mosquitto_broker_clients_disconnected` | `broker_clients_disconnected` | - |
 | `mosquitto_broker_clients_maximum` | `broker_clients_maximum` | **Counter -> Gauge** (it is a high-water mark, `rate()` was already meaningless) |
@@ -153,7 +151,7 @@ groups:
 
       # Gauges
       - record: broker_clients_total
-        expr: mosquitto_broker_clients_total
+        expr: mosquitto_broker_clients
       - record: broker_clients_connected
         expr: mosquitto_broker_clients_connected
       - record: broker_clients_disconnected
@@ -213,8 +211,7 @@ them).
 
 ### `--pass` (argv password), already removed pre-v1.0.0
 
-`--pass` never accepted a password on the command line as of this exporter's
-Phase 1 hardening (arguments are visible via `ps`, shell history, and
+`--pass` no longer accepts a password on the command line (arguments are visible via `ps`, shell history, and
 `docker inspect`). Use `--pass-file <path>` (a file containing the password)
 or the `MQTT_PASS` environment variable. An `--endpoint` containing embedded
 credentials (`tcp://user:pass@host`) is also rejected at startup - move the
@@ -236,7 +233,19 @@ the TLS handshake unless you either:
 A TLS certificate/key load failure now also fails startup outright instead
 of logging a warning and continuing with a broken TLS configuration.
 
-## 6. New flag: `--sys-interval` / `MQTT_SYS_INTERVAL`
+Credentials are rejected on plaintext broker transports. Use a TLS endpoint
+such as `ssl://broker:8883`, or a local `unix://` socket, whenever `--user`,
+`--pass-file`, `MQTT_USER`, or `MQTT_PASS` is set. TLS options supplied with a
+plaintext endpoint are also rejected instead of being silently ignored.
+
+## 6. Changed default: `--bind-address`
+
+The metrics listener now defaults to `127.0.0.1:9234` instead of
+`0.0.0.0:9234`. Container deployments that publish port 9234 must explicitly
+set `--bind-address 0.0.0.0:9234` and restrict access to the monitoring
+network or an authenticating reverse proxy.
+
+## 7. New flag: `--sys-interval` / `MQTT_SYS_INTERVAL`
 
 Default **10s**, must be greater than zero. It sizes one thing only: the
 `$SYS/broker/uptime` staleness-heartbeat window used to detect a broker that
@@ -252,7 +261,7 @@ side is also 10s) for the most accurate stall detection; a mismatch only
 degrades the *window size* used for detecting a stall, it does not delete or
 corrupt any data.
 
-## 7. Upgrade checklist
+## 8. Upgrade checklist
 
 - [ ] Load the recording rules in §3 if you are not ready to update every
       dashboard/alert immediately.
@@ -265,7 +274,10 @@ corrupt any data.
       config; replace any logic depending on it with a `mosquitto_up` alert
       (§4).
 - [ ] Confirm no deployment still relies on embedded URL credentials or an
-      unverified TLS broker connection; add `--ca-cert` or
-      `--insecure-skip-verify` explicitly if needed (§4, §5).
+      unverified or plaintext broker connection; move authenticated connections
+      to TLS and add `--ca-cert` or `--insecure-skip-verify` if needed (§4, §5).
+- [ ] If the exporter must be reachable outside localhost, set
+      `--bind-address` explicitly and restrict the listener to your monitoring
+      network (§6).
 - [ ] Set `--sys-interval`/`MQTT_SYS_INTERVAL` if your broker's own
-      `sys_interval` is not the default 10s (§6).
+      `sys_interval` is not the default 10s (§7).

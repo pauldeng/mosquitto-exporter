@@ -12,7 +12,7 @@ import (
 )
 
 // FileConfig holds the optional per-key overrides decoded from a YAML config
-// file (DESIGN.md §7 Phase 5). A nil field means the key was absent from the
+// file. A nil field means the key was absent from the
 // file; the caller then falls through to its own default. Fields mirror the
 // command's flag surface exactly - see cmd/mosquitto-exporter's flag
 // definitions for the authoritative list and precedence order

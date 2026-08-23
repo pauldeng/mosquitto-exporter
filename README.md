@@ -11,11 +11,15 @@ the `Dockerfile` in this repo (distroless base, non-root):
 ```
 docker run \
   -p 9234:9234 pauldeng/mosquitto-exporter:<tag> \
+  --bind-address 0.0.0.0:9234 \
   --endpoint tcp://mosquitto:1883
 ```
 Then scrape `http://<host>:9234/metrics` from Prometheus. `mosquitto_up`
 reports connectivity to the broker; every other series is prefixed
-`mosquitto_broker_*`.
+`mosquitto_broker_*`, `mosquitto_exporter_*`, `process_*`, or `go_*`.
+The default listener is `127.0.0.1:9234`; the container example opts into
+all interfaces because Docker port publishing requires it. Expose that port
+only to a trusted monitoring network or an authenticating reverse proxy.
 
 ## Usage
 
@@ -27,7 +31,7 @@ USAGE:
    mosquitto-exporter [global options]
 
 VERSION:
-   <release tag, git describe output, or dev for a plain go build>, go1.25.0
+   <release tag or dev for a plain go build>, <Go runtime version>
 
 AUTHORS:
    Johan Ryberg <johan@securit.se>
@@ -38,9 +42,9 @@ AUTHORS:
 GLOBAL OPTIONS:
    --config string                   Path to an optional YAML config file (precedence: flags > env > YAML > defaults). Not naming one, here or via CONFIG_FILE, is not an error; naming one that is missing or malformed is a startup error [$CONFIG_FILE]
    --log-level string                Log level (debug|info|warn|error) (default: "info") [$LOG_LEVEL]
-   --endpoint string, -e string      Endpoint for the Mosquitto message broker (default: "tcp://127.0.0.1:1883") [$BROKER_ENDPOINT]
-   --bind-address string, -b string  Listen address for metrics HTTP endpoint (default: "0.0.0.0:9234") [$BIND_ADDRESS]
-   --user string, -u string          Username for the Mosquitto message broker [$MQTT_USER]
+   --endpoint string, -e string      Endpoint for the Mosquitto message broker; credentials require TLS or a local unix socket (default: "tcp://127.0.0.1:1883") [$BROKER_ENDPOINT]
+   --bind-address string, -b string  Listen address for metrics HTTP endpoint (default: "127.0.0.1:9234") [$BIND_ADDRESS]
+   --user string, -u string          Username for the Mosquitto message broker (requires TLS or a local unix socket) [$MQTT_USER]
    --pass-file string                Path to a file containing the password for the Mosquitto broker user (password can also come from MQTT_PASS; never pass it on argv, and never put it in the YAML config file) [$MQTT_PASS_FILE]
    --cert string, -c string          Location of a TLS certificate .pem file for the Mosquitto message broker [$MQTT_CERT]
    --key string, -k string           Location of a TLS private key .pem file for the Mosquitto message broker [$MQTT_KEY]
@@ -48,23 +52,22 @@ GLOBAL OPTIONS:
    --insecure-skip-verify            Disable TLS certificate verification of the broker (INSECURE - only for testing) [$MQTT_INSECURE_SKIP_VERIFY]
    --client-id string, -i string     Client id to be used to connect to the Mosquitto message broker [$MQTT_CLIENT_ID]
    --sys-interval duration           Sizes the $SYS/broker/uptime staleness-heartbeat window only (must be > 0): while connected, the broker is reported down if uptime has not advanced for 3x this duration. It does not expire individual cached series and should match the broker's own sys_interval (default: 10s) [$MQTT_SYS_INTERVAL]
-   --otlp-endpoint string            OTLP receiver endpoint to push metrics to (e.g. localhost:4317 for grpc, http://localhost:4318 for http); empty disables OTLP export entirely, no exporter is built and no OTLP network egress happens. Prometheus scraping via /metrics is always on and unaffected [$OTLP_ENDPOINT]
+   --otlp-endpoint string            EXPERIMENTAL: OTLP receiver endpoint to push metrics to; empty disables OTLP export. Counter resets after broker restarts are not yet represented correctly in OTLP [$OTLP_ENDPOINT]
    --otlp-protocol string            OTLP wire protocol to use when --otlp-endpoint is set: grpc or http (default: "grpc") [$OTLP_PROTOCOL]
    --otlp-interval duration          Push interval for OTLP metric export when --otlp-endpoint is set (must be > 0) (default: 1m0s) [$OTLP_INTERVAL]
    --help, -h                        show help
    --version, -v                     print the version
 ```
 
-`VERSION` is injected at build time from the nearest git tag (see
-`VERSION` in the `Makefile` / `{{ .Tag }}` in `.goreleaser.yaml`). Plain
+`VERSION` is injected from the release tag by `.goreleaser.yaml`. Plain
 `go build` uses the neutral value `dev`; release versions are never
-hand-maintained in source.
+hand-maintained in source. `make build` is only a wrapper around GoReleaser,
+so local snapshots and tagged releases use the same build configuration.
 
 OTLP metrics export (`--otlp-endpoint`/`--otlp-protocol`/`--otlp-interval`)
-is opt-in and off by default - Prometheus scraping via `/metrics` is
-unaffected either way. See [`docs/OTEL.md`](docs/OTEL.md) for a worked
-example, the OTel Prometheus exporter's experimental status, and the OTLP
-counter-reset limitation across broker restarts.
+is **experimental**, opt-in, and off by default. Prometheus scraping via
+`/metrics` is production-supported and unaffected. See
+[`docs/OTEL.md`](docs/OTEL.md) for the OTLP counter-reset limitation.
 
 ## Configuration
 
@@ -101,6 +104,11 @@ For the password specifically, an explicit `--pass-file` or
 `MQTT_PASS_FILE` wins over `MQTT_PASS`; otherwise `MQTT_PASS` wins over a
 YAML `pass_file`, preserving the environment-over-YAML rule.
 
+Broker credentials are accepted only over TLS (`ssl://`, `tls://`,
+`mqtts://`, `mqtt+ssl://`, `tcps://`, or `wss://`) or a local `unix://`
+socket. Plaintext transports may be used only without credentials. TLS
+options on a plaintext endpoint are rejected instead of being ignored.
+
 At `--log-level debug`, the exporter logs the fully-resolved configuration
 once at startup - which value won, from whichever source - as a single
 `"effective configuration"` line. Credential values are omitted: username
@@ -136,13 +144,14 @@ and password are represented only as `user_set`/`password_set` booleans.
 
 ## Breaking changes since v0.7.7
 
-v1.0.0 renames every exported metric and changes a few flags. **See
+v1.0.0 renames every broker-derived metric and changes a few flags. **See
 [`docs/MIGRATION.md`](docs/MIGRATION.md) for the full old->new metric mapping
 table, drop-in Prometheus recording rules for a transition window, and the
 complete upgrade checklist**, or [`CHANGELOG.md`](CHANGELOG.md) for the full
 release history. This section is only a summary:
 
-- **Every Prometheus metric is renamed**, five wrong types are fixed
+- **Every broker-derived Prometheus metric is renamed**, while `process_*`
+  and `go_*` keep their existing names. Five wrong types are fixed
   (`clients_total`, `clients_maximum`, `uptime` were Counters and are now
   Gauges; `connections_socket_count`, `clients_expired` were Gauges and are
   now Counters), two duplicate series collapse into one, and the 24
@@ -185,6 +194,7 @@ release history. This section is only a summary:
 - [`mosquitto-exporter.example.yaml`](mosquitto-exporter.example.yaml) - every
   YAML key, commented, with its default.
 - [`CHANGELOG.md`](CHANGELOG.md) - full release history.
+- [`SECURITY.md`](SECURITY.md) - supported versions and private vulnerability reporting.
 
 ## Development notes
 

@@ -8,10 +8,13 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -21,10 +24,15 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"golang.org/x/net/proxy"
 )
 
 const (
-	mqttConnectTimeout = 3 * time.Second
+	mqttConnectTimeout   = 3 * time.Second
+	mqttSubscribeTimeout = 10 * time.Second
+	mqttSubscribeRetry   = 10 * time.Second
+	maxMQTTPacketBytes   = 64 << 10
+	maxMetricsRequests   = 5
 
 	// otelMeterName identifies the one Meter this exporter ever creates.
 	// WithoutScopeInfo (otelprom.go) suppresses it from /metrics entirely, so
@@ -33,14 +41,131 @@ const (
 	otelMeterName = "github.com/pauldeng/mosquitto-exporter"
 )
 
+const (
+	mqttReadHeader = iota
+	mqttReadLength
+	mqttReadPayload
+)
+
+// mqttPacketLimitConn rejects an oversized MQTT Remaining Length before Paho
+// allocates the packet body. Paho reads the fixed header and length one byte at
+// a time, so enforcing the limit here closes the allocation boundary that an
+// application-level payload check cannot reach.
+type mqttPacketLimitConn struct {
+	net.Conn
+	state      int
+	remaining  int
+	multiplier int
+}
+
+func (c *mqttPacketLimitConn) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	switch c.state {
+	case mqttReadHeader:
+		n, err := c.Conn.Read(p[:1])
+		if n == 1 {
+			c.state, c.remaining, c.multiplier = mqttReadLength, 0, 1
+		}
+		return n, err
+	case mqttReadLength:
+		n, err := c.Conn.Read(p[:1])
+		if n != 1 {
+			return n, err
+		}
+		digit := int(p[0] & 127)
+		if c.multiplier > 128*128*128 || digit > (maxMQTTPacketBytes-c.remaining)/c.multiplier {
+			return 0, fmt.Errorf("MQTT packet exceeds %d-byte limit", maxMQTTPacketBytes)
+		}
+		c.remaining += digit * c.multiplier
+		if p[0]&128 != 0 {
+			c.multiplier *= 128
+			return 1, err
+		}
+		if c.remaining == 0 {
+			c.state = mqttReadHeader
+		} else {
+			c.state = mqttReadPayload
+		}
+		return 1, err
+	default:
+		if len(p) > c.remaining {
+			p = p[:c.remaining]
+		}
+		n, err := c.Conn.Read(p)
+		c.remaining -= n
+		if c.remaining == 0 {
+			c.state = mqttReadHeader
+		}
+		return n, err
+	}
+}
+
+func openLimitedMQTTConnection(uri *url.URL, options mqtt.ClientOptions) (net.Conn, error) {
+	dialer := options.Dialer
+	if dialer == nil {
+		dialer = &net.Dialer{Timeout: mqttConnectTimeout}
+	}
+	var conn net.Conn
+	var err error
+	switch strings.ToLower(uri.Scheme) {
+	case "ws", "wss":
+		tlsConfig := options.TLSConfig
+		if strings.EqualFold(uri.Scheme, "ws") {
+			tlsConfig = nil
+		}
+		conn, err = mqtt.NewWebsocket(uri.String(), tlsConfig, options.ConnectTimeout, options.HTTPHeaders, options.WebsocketOptions)
+	case "mqtt", "tcp":
+		conn, err = proxy.FromEnvironmentUsing(dialer).Dial("tcp", uri.Host)
+	case "unix":
+		address := uri.Path
+		if uri.Host != "" {
+			address = uri.Host
+		}
+		conn, err = dialer.Dial("unix", address)
+	case "ssl", "tls", "mqtts", "mqtt+ssl", "tcps":
+		tlsConfig := options.TLSConfig
+		if tlsConfig == nil {
+			tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		} else {
+			tlsConfig = tlsConfig.Clone()
+		}
+		if tlsConfig.ServerName == "" {
+			tlsConfig.ServerName = uri.Hostname()
+		}
+		if os.Getenv("all_proxy") == "" {
+			conn, err = tls.DialWithDialer(dialer, "tcp", uri.Host, tlsConfig)
+		} else {
+			var raw net.Conn
+			raw, err = proxy.FromEnvironment().Dial("tcp", uri.Host)
+			if err == nil {
+				tlsConn := tls.Client(raw, tlsConfig)
+				err = tlsConn.Handshake()
+				if err != nil {
+					_ = raw.Close()
+				} else {
+					conn = tlsConn
+				}
+			}
+		}
+	default:
+		return nil, fmt.Errorf("unsupported MQTT endpoint scheme %q", uri.Scheme)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &mqttPacketLimitConn{Conn: conn}, nil
+}
+
 // buildTLSConfig assembles the broker TLS configuration, or returns (nil,
 // nil) when no TLS-related flag was set at all - in which case an ssl://
 // endpoint still gets a secure, verified default TLS handshake from paho
 // (nil *tls.Config in Go's crypto/tls means "verify against the system CA
 // pool"), and a tcp:// endpoint is unaffected.
 //
-// Fails closed (S2): any load error aborts startup instead of continuing
-// with a partial or zero-value TLS configuration.
+// Any load error aborts startup instead of continuing with a partial TLS
+// configuration.
 func buildTLSConfig(certFile, keyFile, caCertFile string, insecureSkipVerify bool) (*tls.Config, error) {
 	if certFile == "" && keyFile == "" && caCertFile == "" && !insecureSkipVerify {
 		return nil, nil
@@ -83,7 +208,7 @@ func buildTLSConfig(certFile, keyFile, caCertFile string, insecureSkipVerify boo
 
 // connectWithBackoff makes the initial connection attempt to the broker,
 // retrying with exponential backoff and jitter until it succeeds or ctx is
-// cancelled (R6). Once connected, paho's own AutoReconnect (left at its
+// cancelled. Once connected, paho's own AutoReconnect (left at its
 // default) takes over for any later, post-initial connection loss.
 //
 // Logging is rate-limited: every attempt for the first few, then every 10th,
@@ -132,8 +257,38 @@ func connectWithBackoff(ctx context.Context, client mqtt.Client, endpoint string
 	}
 }
 
+type mqttSubscriber interface {
+	IsConnected() bool
+	Subscribe(string, byte, mqtt.MessageHandler) mqtt.Token
+}
+
+func retrySYSSubscription(client mqttSubscriber, store *Store, stillCurrent func() bool, retryDelay time.Duration) {
+	for client.IsConnected() && stillCurrent() {
+		token := client.Subscribe("$SYS/#", 0, func(_ mqtt.Client, msg mqtt.Message) {
+			store.Update(msg.Topic(), string(msg.Payload()))
+		})
+		if token.WaitTimeout(mqttSubscribeTimeout) && token.Error() == nil {
+			slog.Info("subscribed to broker metrics", "topic", "$SYS/#")
+			return
+		}
+		if err := token.Error(); err != nil {
+			slog.Error("failed to subscribe to broker metrics; retrying", "topic", "$SYS/#", "error", err)
+		} else {
+			slog.Error("timeout subscribing to broker metrics; retrying", "topic", "$SYS/#")
+		}
+		time.Sleep(retryDelay)
+	}
+}
+
+func newMetricsHandler(gatherer prometheus.Gatherer) http.Handler {
+	return promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{
+		MaxRequestsInFlight: maxMetricsRequests,
+		CoalesceGather:      true,
+	})
+}
+
 // newHTTPServer builds the metrics HTTP server on its own explicit
-// http.Server (S6) with all four timeouts set (S4 / gosec G114) - a
+// http.Server with all four timeouts set; a
 // zero-value http.Server has none of them and is vulnerable to Slowloris.
 func newHTTPServer(bindAddress string, handler http.Handler) *http.Server {
 	return &http.Server{
@@ -152,8 +307,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 	}
 	slog.Info("starting", "app", "mosquitto-exporter", "version", cfg.Version)
 
-	// R4: SIGINT/SIGTERM cancel ctx, which drives both the connect-retry loop
-	// and the shutdown sequence below.
+	// SIGINT/SIGTERM cancel ctx, driving connection retry and shutdown.
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -171,11 +325,8 @@ func Run(ctx context.Context, cfg config.Config) error {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 
-	// One MeterProvider, one instrument set (DESIGN.md §5.2): the pull-based
-	// Prometheus reader always exists behind /metrics; the OTLP push reader
-	// is a second, independent reader on the same provider, added only when
-	// explicitly configured (§6.4/§7 Phase 4 - off by default, zero new
-	// egress otherwise).
+	// One instrument set feeds the production Prometheus reader and, when
+	// explicitly configured, the experimental OTLP push reader.
 	promReader, err := newPrometheusReader(registry)
 	if err != nil {
 		return fmt.Errorf("setting up OTel metrics: %w", err)
@@ -198,6 +349,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 	opts.SetCleanSession(true)
 	opts.SetConnectTimeout(mqttConnectTimeout)
 	opts.Dialer.Timeout = mqttConnectTimeout
+	opts.SetCustomOpenConnectionFn(openLimitedMQTTConnection)
 	opts.AddBroker(endpoint)
 
 	if clientID := cfg.ClientID; clientID != "" {
@@ -211,35 +363,28 @@ func Run(ctx context.Context, cfg config.Config) error {
 	}
 	if tlsConfig != nil {
 		opts.SetTLSConfig(tlsConfig)
-		if !strings.HasPrefix(endpoint, "ssl://") && !strings.HasPrefix(endpoint, "tls://") {
-			slog.Warn("TLS was configured but the endpoint scheme is not 'ssl://' or 'tls://'; it will be ignored")
-		}
 	}
 
+	var connectionGeneration atomic.Uint64
 	opts.OnConnect = func(client mqtt.Client) {
 		slog.Info("connected to broker", "endpoint", endpoint)
+		generation := connectionGeneration.Add(1)
 		store.SetConnected(true)
-		// subscribe on every (re)connect
-		token := client.Subscribe("$SYS/#", 0, func(_ mqtt.Client, msg mqtt.Message) {
-			store.Update(msg.Topic(), string(msg.Payload()))
-		})
-		if !token.WaitTimeout(10 * time.Second) {
-			slog.Error("timeout subscribing to topic", "topic", "$SYS/#")
-		} else if err := token.Error(); err != nil {
-			slog.Error("failed to subscribe to topic", "topic", "$SYS/#", "error", err)
-		}
+		retrySYSSubscription(client, store, func() bool {
+			return connectionGeneration.Load() == generation
+		}, mqttSubscribeRetry)
 	}
 	opts.OnConnectionLost = func(_ mqtt.Client, err error) {
+		connectionGeneration.Add(1)
 		store.SetConnected(false)
 		slog.Warn("connection to broker lost", "endpoint", endpoint, "error", err)
 	}
 
 	client := mqtt.NewClient(opts)
 
-	// S6: an explicit ServeMux instead of http.DefaultServeMux's global
-	// mutable state.
+	// Keep handlers on a private mux instead of mutable package-global state.
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
+	mux.Handle("/metrics", newMetricsHandler(registry))
 	mux.HandleFunc("/", serveVersion(cfg.Version))
 
 	srv := newHTTPServer(cfg.BindAddress, mux)
@@ -254,7 +399,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 		serveErrCh <- nil
 	}()
 
-	// R1: connect to the broker in the background so /metrics is already
+	// Connect in the background so /metrics is already
 	// serving (with mosquitto_up 0) while the broker is unreachable, instead
 	// of refusing connections until the broker answers.
 	connectDone := make(chan struct{})
@@ -285,7 +430,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 	}
 	store.SetConnected(false)
 
-	// Shutdown order (DESIGN.md §7 Phase 4): MQTT is already stopped above;
+	// Shutdown order: MQTT is already stopped above;
 	// MeterProvider.Shutdown performs its own final collect/export per
 	// reader before releasing resources (metric.PeriodicReader.Shutdown
 	// flushes pending telemetry internally, so a separate ForceFlush call

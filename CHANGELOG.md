@@ -7,8 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0] - 2026-08-23
 
-A ground-up correctness, security, and metric-model pass. **Every metric this
-exporter exports is renamed, and several defaults change.** Read
+A ground-up correctness, security, and metric-model pass. **Every broker
+metric is renamed, and several defaults change.** The existing `process_*`
+and `go_*` exporter self-metrics keep their names. Read
 [`docs/MIGRATION.md`](docs/MIGRATION.md) in full before upgrading a production
 instance - it has the complete old->new mapping table, drop-in Prometheus
 recording rules for a transition window, and an upgrade checklist. This entry
@@ -16,7 +17,7 @@ only summarizes.
 
 ### BREAKING CHANGES
 
-- **Every exported Prometheus metric is renamed** (`broker_messages_received`
+- **Every broker-derived Prometheus metric is renamed** (`broker_messages_received`
   -> `mosquitto_broker_messages_received_total`, and so on for all of them).
   See [`docs/MIGRATION.md`](docs/MIGRATION.md) for the full mapping and
   compatibility recording rules.
@@ -57,10 +58,16 @@ only summarizes.
   you pass `--ca-cert <path>` (to trust that CA while keeping verification
   on) or explicitly opt back into the old behavior with
   `--insecure-skip-verify`.
+- **Authenticated broker connections now require TLS or a local Unix
+  socket.** Credentials on `tcp://`/`ws://` and TLS options on plaintext
+  endpoints are rejected instead of being sent or ignored insecurely.
+- **`--bind-address` now defaults to `127.0.0.1:9234`** instead of all
+  interfaces. Containers must explicitly opt into `0.0.0.0:9234` and should
+  restrict it to their monitoring network.
 
 ### Added
 
-- **OTLP metrics export**, opt-in via `--otlp-endpoint`/`--otlp-protocol`/
+- **Experimental OTLP metrics export**, opt-in via `--otlp-endpoint`/`--otlp-protocol`/
   `--otlp-interval`. Off by default: with no endpoint set, no OTLP exporter is
   constructed and no OTLP network egress happens. Prometheus scraping via
   `/metrics` is unaffected either way. See [`docs/OTEL.md`](docs/OTEL.md),
@@ -114,5 +121,11 @@ only summarizes.
   before exit.
 - **Reconnect now uses exponential backoff with jitter** and rate-limited
   logging, replacing an unbounded/tight reconnect loop.
+- **Failed `$SYS/#` subscriptions are retried** while the MQTT connection is
+  alive instead of leaving the exporter permanently unsubscribed.
+- **Inbound MQTT packets are capped at 64 KiB** before Paho allocates their
+  bodies, preventing broker-controlled packet lengths from exhausting memory.
+- **Concurrent metric gathers are bounded and coalesced**, preventing scrape
+  floods from creating unlimited collection work.
 
 [1.0.0]: https://github.com/pauldeng/mosquitto-exporter/releases/tag/v1.0.0

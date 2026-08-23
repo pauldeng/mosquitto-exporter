@@ -1,7 +1,7 @@
 package exporter
 
 // otelmetrics.go declares the mosquitto_broker_* OTel instrument set against
-// the stable v1 go.opentelemetry.io/otel/metric API only (DESIGN.md §5.2):
+// the stable v1 go.opentelemetry.io/otel/metric API only:
 // no symbol from the experimental go.opentelemetry.io/otel/exporters/prometheus
 // module may appear in this file - that containment is confined to
 // otelprom.go instead, so a breaking change in the experimental module is a
@@ -16,7 +16,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// Observable, not synchronous (DESIGN.md §5.3): only observable instruments
+// Observable, not synchronous: only observable instruments
 // can decline to report a value for a collection cycle, which is what lets
 // a disconnected or heartbeat-stalled broker make every mosquitto_broker_*
 // series vanish together instead of freezing at a stale value forever.
@@ -60,8 +60,8 @@ func observeFunc(
 	return func(_ context.Context, o metric.Observer) error {
 		up, samples := store.BrokerSnapshot()
 		if !up {
-			// DESIGN.md §5.3: disconnected, or the uptime heartbeat has
-			// stalled - observe nothing so every mosquitto_broker_* series
+			// When disconnected or the uptime heartbeat has stalled, observe
+			// nothing so every mosquitto_broker_* series
 			// goes absent together, rather than freezing at a stale value.
 			return nil
 		}

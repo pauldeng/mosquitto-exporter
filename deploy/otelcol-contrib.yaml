@@ -1,10 +1,8 @@
 # otelcol-contrib config: ship mosquitto.log to Loki.
 #
-# Scope and rationale: mosquitto-exporter DESIGN.md §5.6 (config, not a Go
-# tailer - rotation/inode-tracking/checkpointing/backpressure already exist
-# here and in Alloy's loki.source.file), §4/§4.2 (verified broker log
-# facts), §2 (auth/ACL logging is explicitly out of scope - see the note
-# above the `logs` pipeline). Full operator guidance lives in
+# This is configuration, not a Go tailer: rotation, inode tracking,
+# checkpointing, and backpressure already exist here and in Alloy's
+# loki.source.file. Full operator guidance lives in
 # ../docs/LOGS.md - read it before deploying this.
 #
 # This is a FILE tailer. In Docker/Kubernetes, mosquitto's stdout is already
@@ -65,8 +63,8 @@ processors:
   batch: {}
   resource/mosquitto:
     attributes:
-      # Correlates these logs with this exporter's metrics in Grafana. Per
-      # DESIGN.md §4.1, target identity belongs in scrape/collector config,
+      # Correlates these logs with this exporter's metrics in Grafana. Target
+      # identity belongs in scrape/collector config,
       # not invented by an exporter - the same rule applies here. Set
       # MOSQUITTO_INSTANCE to whatever `instance` label your Prometheus
       # scrape config already assigns to this broker/exporter pair (or the

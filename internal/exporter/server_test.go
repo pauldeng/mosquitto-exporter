@@ -1,10 +1,5 @@
 package exporter
 
-// Phase 1 lifecycle/TLS tests (DESIGN.md §7 Phase 1, §8 gates G4/G5). These
-// cover the pieces AGENT-2 owns in main.go: serve-before-connect (R1), TLS
-// hardening (S1/S2), credential handling (S3/decision 10.14), and the
-// explicit http.Server timeouts (S4/S6).
-
 import (
 	"context"
 	"crypto/ecdsa"
@@ -14,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -21,14 +17,138 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/pauldeng/mosquitto-exporter/internal/config"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	dto "github.com/prometheus/client_model/go"
 )
+
+type blockingGatherer struct {
+	entered chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (g *blockingGatherer) Gather() ([]*dto.MetricFamily, error) {
+	g.once.Do(func() { close(g.entered) })
+	<-g.release
+	return nil, nil
+}
+
+//nolint:paralleltest // temporarily constrains GOMAXPROCS to schedule each blocked request deterministically
+func TestMetricsHandlerBoundsConcurrentScrapes(t *testing.T) {
+	oldProcs := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(oldProcs) })
+	release := make(chan struct{})
+	gatherer := &blockingGatherer{entered: make(chan struct{}), release: release}
+	handler := newMetricsHandler(gatherer)
+	done := make(chan struct{}, maxMetricsRequests)
+
+	for range maxMetricsRequests {
+		go func() {
+			handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/metrics", nil))
+			done <- struct{}{}
+		}()
+		runtime.Gosched()
+	}
+	<-gatherer.entered
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		close(release)
+		t.Fatalf("overflow scrape status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	close(release)
+	for range maxMetricsRequests {
+		<-done
+	}
+}
+
+type testToken struct {
+	done bool
+	err  error
+}
+
+func (t testToken) Wait() bool                     { return t.done }
+func (t testToken) WaitTimeout(time.Duration) bool { return t.done }
+func (t testToken) Done() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+func (t testToken) Error() error { return t.err }
+
+type testSubscriber struct {
+	tokens    []mqtt.Token
+	calls     int
+	connected bool
+}
+
+func (s *testSubscriber) IsConnected() bool { return s.connected }
+func (s *testSubscriber) Subscribe(_ string, _ byte, _ mqtt.MessageHandler) mqtt.Token {
+	token := s.tokens[s.calls]
+	s.calls++
+	return token
+}
+
+func TestRetrySYSSubscription(t *testing.T) {
+	t.Parallel()
+	subscriber := &testSubscriber{
+		connected: true,
+		tokens: []mqtt.Token{
+			testToken{done: true, err: errors.New("suback rejected")},
+			testToken{done: true},
+		},
+	}
+	retrySYSSubscription(subscriber, NewStore(time.Second), func() bool { return true }, 0)
+	if subscriber.calls != 2 {
+		t.Fatalf("Subscribe calls = %d, want 2", subscriber.calls)
+	}
+}
+
+func TestMQTTPacketLimitConn(t *testing.T) {
+	t.Parallel()
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = server.Close(); _ = client.Close() })
+	limited := &mqttPacketLimitConn{Conn: client}
+
+	go func() {
+		_, _ = server.Write([]byte{0x30, 0x81, 0x80, 0x04}) // Remaining Length = 65,537.
+	}()
+	one := make([]byte, 1)
+	for range 3 {
+		if _, err := io.ReadFull(limited, one); err != nil {
+			t.Fatalf("reading header byte: %v", err)
+		}
+	}
+	if _, err := io.ReadFull(limited, one); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized Remaining Length error = %v", err)
+	}
+}
+
+func TestMQTTPacketLimitConnAcceptsBoundedPackets(t *testing.T) {
+	t.Parallel()
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = server.Close(); _ = client.Close() })
+	limited := &mqttPacketLimitConn{Conn: client}
+	want := []byte{0x30, 0x03, '1', '2', '3', 0xd0, 0x00}
+	go func() { _, _ = server.Write(want) }()
+	got := make([]byte, len(want))
+	if _, err := io.ReadFull(limited, got); err != nil {
+		t.Fatalf("reading bounded packets: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("bounded packets changed: got %v, want %v", got, want)
+	}
+}
 
 // writeTempCA writes a throwaway self-signed CA certificate (PEM) to a file
 // under dir and returns its path. Used only to exercise buildTLSConfig's
@@ -74,7 +194,7 @@ func TestBuildTLSConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("insecure-skip-verify defaults to false and MinVersion is TLS 1.2 (S1)", func(t *testing.T) {
+	t.Run("insecure-skip-verify defaults to false and MinVersion is TLS 1.2", func(t *testing.T) {
 		t.Parallel()
 		caFile := writeTempCA(t, t.TempDir())
 		cfg, err := buildTLSConfig("", "", caFile, false)
@@ -103,11 +223,11 @@ func TestBuildTLSConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("missing keypair fails closed (S2)", func(t *testing.T) {
+	t.Run("missing keypair fails closed", func(t *testing.T) {
 		t.Parallel()
 		_, err := buildTLSConfig("/nonexistent/cert.pem", "/nonexistent/key.pem", "", false)
 		if err == nil {
-			t.Fatal("expected an error for a missing keypair; today's bug logs and continues (fails open)")
+			t.Fatal("expected an error for a missing keypair")
 		}
 	})
 
@@ -141,10 +261,8 @@ func TestBuildTLSConfig(t *testing.T) {
 	})
 }
 
-// TestTLSHandshake_VerifiesByDefault proves G4's "the client refuses a
-// broker presenting an untrusted certificate unless insecure mode is
-// explicitly opted into" with a real TLS handshake, not just field
-// inspection.
+// TestTLSHandshake_VerifiesByDefault uses a real TLS handshake to verify that
+// untrusted certificates are rejected unless insecure mode is explicitly set.
 func TestTLSHandshake_VerifiesByDefault(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -178,29 +296,21 @@ func TestNewHTTPServer_AllTimeoutsSet(t *testing.T) {
 	t.Parallel()
 	srv := newHTTPServer("127.0.0.1:0", http.NewServeMux())
 	if srv.ReadHeaderTimeout <= 0 {
-		t.Error("ReadHeaderTimeout must be non-zero (S4 / gosec G114)")
+		t.Error("ReadHeaderTimeout must be non-zero (gosec G114)")
 	}
 	if srv.ReadTimeout <= 0 {
-		t.Error("ReadTimeout must be non-zero (S4 / gosec G114)")
+		t.Error("ReadTimeout must be non-zero (gosec G114)")
 	}
 	if srv.WriteTimeout <= 0 {
-		t.Error("WriteTimeout must be non-zero (S4 / gosec G114)")
+		t.Error("WriteTimeout must be non-zero (gosec G114)")
 	}
 	if srv.IdleTimeout <= 0 {
-		t.Error("IdleTimeout must be non-zero (S4 / gosec G114)")
+		t.Error("IdleTimeout must be non-zero (gosec G114)")
 	}
 }
 
-// TestMetricsServesMosquittoUpZeroWithoutBroker is G5's single most
-// important gate: "/metrics returns 200 with mosquitto_up 0 while the
-// broker is down." It exercises the same wiring runServer does - a Store
-// registered into the default Prometheus registry, reporting disconnected -
-// without needing a live broker or HTTP listener.
-//
-// See also the live end-to-end proof in the Phase 1 handoff report: the
-// built binary, pointed at a closed port, answers `curl /metrics` with
-// `mosquitto_up 0` at HTTP 200 while it keeps retrying the broker in the
-// background.
+// TestMetricsServesMosquittoUpZeroWithoutBroker verifies that a disconnected
+// store serves mosquitto_up 0 without requiring a broker or HTTP listener.
 func TestMetricsServesMosquittoUpZeroWithoutBroker(t *testing.T) {
 	t.Parallel()
 	// Own registry, not the default one: main_test.go registers sharedStore
@@ -225,7 +335,7 @@ func TestMetricsServesMosquittoUpZeroWithoutBroker(t *testing.T) {
 	}
 }
 
-//nolint:paralleltest // starts the process-level signal handler used by runServer
+//nolint:paralleltest // starts the process-level signal handler used by Run
 func TestRunServerServesWhileBrokerIsDownAndShutsDown(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -270,10 +380,10 @@ func TestRunServerServesWhileBrokerIsDownAndShutsDown(t *testing.T) {
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("runServer returned error: %v", err)
+			t.Fatalf("Run returned error: %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("runServer did not stop within 5 seconds")
+		t.Fatal("Run did not stop within 5 seconds")
 	}
 	if elapsed := time.Since(started); elapsed >= 5*time.Second {
 		t.Fatalf("shutdown took %s, want under 5s", elapsed)
@@ -281,7 +391,7 @@ func TestRunServerServesWhileBrokerIsDownAndShutsDown(t *testing.T) {
 }
 
 // TestRunServerWithOTLPEndpointConfigured proves the opt-in OTLP push reader
-// (DESIGN.md §7 Phase 4 item 5) wires into Run without blocking startup or
+// wires into Run without blocking startup or
 // shutdown, even though nothing is listening at the configured endpoint: the
 // gRPC OTLP exporter dials lazily, so /metrics must still serve promptly and
 // the whole process must still stop within the same budget as the
