@@ -510,9 +510,7 @@ func TestProcessUpdate_Race(t *testing.T) {
 
 	// Feeder: repeatedly creates brand-new topics (forces map writes, not
 	// just updates) and updates an existing counter (drives C1).
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		i := 0
 		for {
 			select {
@@ -526,13 +524,11 @@ func TestProcessUpdate_Race(t *testing.T) {
 				i++
 			}
 		}
-	}()
+	})
 
 	// Scraper: repeatedly renders /metrics, invoking Store.Collect
 	// concurrently with the feeder's Update calls.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-done:
@@ -543,13 +539,11 @@ func TestProcessUpdate_Race(t *testing.T) {
 				promhttp.Handler().ServeHTTP(rec, req)
 			}
 		}
-	}()
+	})
 
 	// Resetter: simulates paho's OnConnectionLost callback goroutine, which
 	// calls Store.Reset concurrently with the feeder's map writes.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-done:
@@ -558,7 +552,7 @@ func TestProcessUpdate_Race(t *testing.T) {
 				sharedStore.Reset()
 			}
 		}
-	}()
+	})
 
 	wg.Wait()
 }

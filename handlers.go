@@ -2,9 +2,8 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
-
-	log "github.com/sirupsen/logrus"
 )
 
 /*
@@ -24,6 +23,6 @@ var landingPage = []byte(fmt.Sprintf(`<html>
 func serveVersion(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if _, err := w.Write(landingPage); err != nil {
-		log.Warnf("writing landing page response: %s", err)
+		slog.Warn("writing landing page response", "error", err)
 	}
 }

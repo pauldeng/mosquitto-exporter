@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -19,7 +20,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	log "github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v3"
 )
 
@@ -28,9 +28,30 @@ const (
 	mqttConnectTimeout = 3 * time.Second
 )
 
+// logLevel backs the default logger's level and is set from --log-level /
+// LOG_LEVEL once flags are parsed (see newCommand's Before hook). Its zero
+// value is slog.LevelInfo, so logging before that point (e.g. a flag parse
+// error) still uses the documented default.
+var logLevel = new(slog.LevelVar)
+
+func init() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
+}
+
+// parseLogLevel validates --log-level against slog's own level parsing
+// (debug|info|warn|error, case-insensitive) rather than hand-rolling a
+// second parser for the same four names.
+func parseLogLevel(s string) (slog.Level, error) {
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(s)); err != nil {
+		return 0, fmt.Errorf("invalid --log-level %q: %w", s, err)
+	}
+	return level, nil
+}
+
 func main() {
 	if err := newCommand().Run(context.Background(), os.Args); err != nil {
-		log.Error(err)
+		slog.Error("exiting", "error", err)
 		os.Exit(1)
 	}
 }
@@ -44,9 +65,23 @@ func newCommand() *cli.Command {
 			"Arturo Reuschenbach Puncernau <a.reuschenbach.puncernau@sap.com>",
 			"Fabian Ruff <fabian.ruff@sap.com>",
 		},
-		Usage:  "Prometheus exporter for broker metrics",
+		Usage: "Prometheus exporter for broker metrics",
+		Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+			level, err := parseLogLevel(cmd.String("log-level"))
+			if err != nil {
+				return ctx, err
+			}
+			logLevel.Set(level)
+			return ctx, nil
+		},
 		Action: runServer,
 		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:    "log-level",
+				Usage:   "Log level (debug|info|warn|error)",
+				Value:   "info",
+				Sources: cli.EnvVars("LOG_LEVEL"),
+			},
 			&cli.StringFlag{
 				Name:    "endpoint",
 				Aliases: []string{"e"},
@@ -192,7 +227,7 @@ func buildTLSConfig(certFile, keyFile, caCertFile string, insecureSkipVerify boo
 	}
 
 	if insecureSkipVerify {
-		log.Warn("TLS certificate verification disabled via --insecure-skip-verify: the broker's identity will not be authenticated")
+		slog.Warn("TLS certificate verification disabled via --insecure-skip-verify: the broker's identity will not be authenticated")
 		tlsConfig.InsecureSkipVerify = true
 	}
 
@@ -221,7 +256,7 @@ func connectWithBackoff(ctx context.Context, client mqtt.Client, endpoint string
 			return
 		}
 		if gotResult && token.Error() == nil {
-			log.Infof("Connected to %s", endpoint)
+			slog.Info("connected to broker", "endpoint", endpoint)
 			return
 		}
 
@@ -230,7 +265,7 @@ func connectWithBackoff(ctx context.Context, client mqtt.Client, endpoint string
 			err = fmt.Errorf("timeout connecting to %s", endpoint)
 		}
 		if attempt <= 5 || attempt%10 == 0 {
-			log.Warnf("Failed to connect to %s (attempt %d): %s; retrying in ~%s", endpoint, attempt, err, backoff)
+			slog.Warn("failed to connect to broker", "endpoint", endpoint, "attempt", attempt, "error", err, "retry_in", backoff)
 		}
 
 		// jitter in [backoff/2, backoff) avoids every retrying instance
@@ -265,7 +300,7 @@ func newHTTPServer(bindAddress string, handler http.Handler) *http.Server {
 }
 
 func runServer(ctx context.Context, cmd *cli.Command) error {
-	log.Infof("Starting %s %s", appName, versionString())
+	slog.Info("starting", "app", appName, "version", versionString())
 
 	// R4: SIGINT/SIGTERM cancel ctx, which drives both the connect-retry loop
 	// and the shutdown sequence below.
@@ -313,27 +348,27 @@ func runServer(ctx context.Context, cmd *cli.Command) error {
 	if tlsConfig != nil {
 		opts.SetTLSConfig(tlsConfig)
 		if !strings.HasPrefix(endpoint, "ssl://") && !strings.HasPrefix(endpoint, "tls://") {
-			log.Warn("TLS was configured but the endpoint scheme is not 'ssl://' or 'tls://'; it will be ignored")
+			slog.Warn("TLS was configured but the endpoint scheme is not 'ssl://' or 'tls://'; it will be ignored")
 		}
 	}
 
 	resetOnDisconnect := cmd.Bool("reset-metrics")
 	opts.OnConnect = func(client mqtt.Client) {
-		log.Infof("Connected to %s", endpoint)
+		slog.Info("connected to broker", "endpoint", endpoint)
 		store.SetConnected(true)
 		// subscribe on every (re)connect
 		token := client.Subscribe("$SYS/#", 0, func(_ mqtt.Client, msg mqtt.Message) {
 			store.Update(msg.Topic(), string(msg.Payload()))
 		})
 		if !token.WaitTimeout(10 * time.Second) {
-			log.Error("Timeout subscribing to topic $SYS/#")
+			slog.Error("timeout subscribing to topic", "topic", "$SYS/#")
 		} else if err := token.Error(); err != nil {
-			log.Errorf("Failed to subscribe to topic $SYS/#: %s", err)
+			slog.Error("failed to subscribe to topic", "topic", "$SYS/#", "error", err)
 		}
 	}
 	opts.OnConnectionLost = func(_ mqtt.Client, err error) {
 		store.SetConnected(false)
-		log.Warnf("Connection to %s lost: %s", endpoint, err)
+		slog.Warn("connection to broker lost", "endpoint", endpoint, "error", err)
 		if resetOnDisconnect {
 			store.Reset()
 		}
@@ -351,7 +386,7 @@ func runServer(ctx context.Context, cmd *cli.Command) error {
 
 	serveErrCh := make(chan error, 1)
 	go func() {
-		log.Infof("Listening on %s...", srv.Addr)
+		slog.Info("listening", "address", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErrCh <- err
 			return
@@ -371,7 +406,7 @@ func runServer(ctx context.Context, cmd *cli.Command) error {
 	var runErr error
 	select {
 	case <-ctx.Done():
-		log.Info("Shutting down...")
+		slog.Info("shutting down")
 	case runErr = <-serveErrCh:
 		// The HTTP server died on its own (e.g. address already in use):
 		// stop the connect-retry goroutine too instead of leaking it.

@@ -16,7 +16,10 @@ jobs:
         uses: docker/setup-qemu-action@v3
       - uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
+          # Decision 10.3: go.mod stays at 1.25 so the module doesn't force a
+          # toolchain bump on consumers, but release binaries are built with
+          # the newest tested Go (1.27) to ship its full benefit.
+          go-version: '1.27'
       - run: go mod verify
       - run: go test -mod=readonly -v ./...
       - uses: docker/login-action@v3

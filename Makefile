@@ -1,9 +1,13 @@
-PKG_NAME:=github.com/sapcc/mosquitto-exporter
+PKG_NAME:=github.com/pauldeng/mosquitto-exporter
 BUILD_DIR:=bin
 MOSQUITTO_EXPORTER_BINARY:=$(BUILD_DIR)/mosquitto_exporter
-IMAGE := sapcc/mosquitto-exporter
-VERSION=0.8.0
-LDFLAGS=-s -w -X main.Version=$(VERSION) -X main.GITCOMMIT=`git rev-parse --short HEAD`
+IMAGE := pauldeng/mosquitto-exporter
+# Single source of truth for the version: nearest git tag, falling back to
+# the short commit hash when none exists yet. There is no main.GITCOMMIT
+# variable to set - the binary reads the commit from
+# runtime/debug.ReadBuildInfo() instead - so only main.Version is injected.
+VERSION:=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS=-s -w -X main.Version=$(VERSION)
 .PHONY: help
 help:
 	@echo
@@ -23,14 +27,21 @@ help:
 build: export CGO_ENABLED=0
 build:
 	@mkdir -p $(BUILD_DIR)
-	go build -o $(MOSQUITTO_EXPORTER_BINARY) -ldflags="$(LDFLAGS)" $(PKG_NAME)
+	go build -trimpath -o $(MOSQUITTO_EXPORTER_BINARY) -ldflags="$(LDFLAGS)" $(PKG_NAME)
 
 linux: export GOOS=linux
 linux: build
 
-docker:
+# The Dockerfile expects a prebuilt binary named exactly "mosquitto-exporter"
+# at the build context root (goreleaser's own convention, and what its
+# per-platform dockers step provides at release time) - .dockerignore excludes
+# bin/, so linux's bin/mosquitto_exporter is copied into place, not COPYed
+# from bin/ directly.
+docker: linux
+	cp $(MOSQUITTO_EXPORTER_BINARY) mosquitto-exporter
 	docker build -t $(IMAGE):$(VERSION) .
 	docker build -t $(IMAGE):latest .
+	rm -f mosquitto-exporter
 
 push:
 	docker push $(IMAGE):$(VERSION)
