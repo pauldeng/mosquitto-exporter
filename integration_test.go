@@ -8,7 +8,7 @@ package main
 // traffic to move every asserted counter off its initial value, and asserts
 // the full Phase 3 (§6) exported series set.
 //
-// Run with: go test -tags=integration -run TestIntegrationSmoke -v ./...
+// Run with: go test -count=1 -tags=integration -run TestIntegrationSmoke -v ./...
 // Skips cleanly if Docker isn't available, so it never fails on a laptop
 // without it.
 //

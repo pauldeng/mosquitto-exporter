@@ -168,12 +168,35 @@ mosquitto_up 1
 		s := NewStore(10 * time.Second)
 		s.SetConnected(true)
 		s.Update("$SYS/broker/uptime", "1")
-		s.Update("$SYS/broker/messages/stored", "42")
+		s.Update("$SYS/broker/messages/stored", "41")
 		s.Update("$SYS/broker/store/messages/count", "42")
 
 		got := renderStore(s, map[string]bool{"mosquitto_broker_messages_stored": true})
 		if n := strings.Count(got, "# TYPE mosquitto_broker_messages_stored"); n != 1 {
 			t.Fatalf("mosquitto_broker_messages_stored rendered %d times, want exactly 1 despite two source topics; body:\n%s", n, got)
+		}
+		if !strings.Contains(got, "mosquitto_broker_messages_stored 42") {
+			t.Errorf("collapsed alias did not retain the latest value; body:\n%s", got)
+		}
+		s.mu.RLock()
+		cached := len(s.samples)
+		s.mu.RUnlock()
+		if cached != 2 { // uptime + one collapsed messages_stored series
+			t.Errorf("cached samples = %d, want 2", cached)
+		}
+	})
+
+	t.Run("broker info label changes after an upgrade", func(t *testing.T) {
+		t.Parallel()
+		s := NewStore(10 * time.Second)
+		s.SetConnected(true)
+		s.Update("$SYS/broker/uptime", "1")
+		s.Update("$SYS/broker/version", "mosquitto version 2.1.2")
+		s.Update("$SYS/broker/version", "mosquitto version 2.1.3")
+
+		got := renderStore(s, map[string]bool{"mosquitto_broker_info": true})
+		if !strings.Contains(got, `mosquitto_version="2.1.3"`) || strings.Contains(got, `mosquitto_version="2.1.2"`) {
+			t.Errorf("broker info retained a stale version label; body:\n%s", got)
 		}
 	})
 
@@ -204,7 +227,21 @@ mosquitto_up 1
 		_, known := s.samples["$SYS/broker/bytes/received"]
 		s.mu.RUnlock()
 		if !known {
-			t.Error("Update while disconnected must still cache the value, not discard it")
+			t.Error("disconnect must preserve the cached value")
+		}
+
+		// A late message from the closed session must not refresh its heartbeat,
+		// and a new session must prove liveness for itself.
+		s.Update("$SYS/broker/uptime", "2")
+		s.SetConnected(true)
+		got = renderStore(s, map[string]bool{"mosquitto_up": true, "mosquitto_broker_bytes_received_total": true})
+		if !strings.Contains(got, "mosquitto_up 0") || strings.Contains(got, "mosquitto_broker_bytes_received_total") {
+			t.Errorf("reconnect exposed cached broker data before a new heartbeat; got:\n%s", got)
+		}
+		s.Update("$SYS/broker/uptime", "3")
+		got = renderStore(s, map[string]bool{"mosquitto_up": true, "mosquitto_broker_bytes_received_total": true})
+		if !strings.Contains(got, "mosquitto_up 1") || !strings.Contains(got, "mosquitto_broker_bytes_received_total 1024") {
+			t.Errorf("fresh heartbeat did not restore cached broker data; got:\n%s", got)
 		}
 	})
 
@@ -459,10 +496,10 @@ func TestMetricsGolden(t *testing.T) {
 	resetStore(sharedStore)
 	t.Cleanup(func() { resetStore(sharedStore) })
 
+	sharedStore.SetConnected(true)
 	for _, m := range goldenMessages {
 		sharedStore.Update(m.topic, m.payload)
 	}
-	sharedStore.SetConnected(true)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/metrics", nil)
@@ -481,7 +518,7 @@ func TestMetricsGolden(t *testing.T) {
 	// The 24 dropped load/** series (DESIGN.md §6.3, decision 10.4) must
 	// never appear, under any name derived from that topic.
 	if strings.Contains(body, "load_messages_received") {
-		t.Error("a dropped load/** topic produced a series; it must be silently uncounted (unknown_topics_total instead)")
+		t.Error("a deliberately dropped load/** topic produced a series")
 	}
 	// The alias pair must render as exactly one series (DESIGN.md §6.2).
 	if n := strings.Count(body, "# TYPE mosquitto_broker_messages_stored "); n != 1 {

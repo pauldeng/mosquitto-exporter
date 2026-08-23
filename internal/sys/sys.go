@@ -222,12 +222,25 @@ const (
 // recognised, not unknown.
 func isExcludedLoadSeries(topic string) bool {
 	const prefix = "$SYS/broker/load/"
-	if !strings.HasPrefix(topic, prefix) {
+	rest, ok := strings.CutPrefix(topic, prefix)
+	if !ok {
 		return false
 	}
-	// load/connections/* is the one kept family and is in the static table,
-	// so anything reaching here under load/ is a dropped series.
-	return true
+	i := strings.LastIndexByte(rest, '/')
+	if i < 1 {
+		return false
+	}
+	family, window := rest[:i], rest[i+1:]
+	if window != "1min" && window != "5min" && window != "15min" {
+		return false
+	}
+	switch family {
+	case "messages/received", "messages/sent", "publish/dropped", "publish/received",
+		"publish/sent", "bytes/received", "bytes/sent", "sockets":
+		return true
+	default:
+		return false
+	}
 }
 
 // Resolve maps a raw $SYS topic and payload to the series to export.

@@ -89,7 +89,7 @@ jobs:
       # visible in the log and fails the job instead of silently going green.
       - name: integration smoke test
         run: |
-          go test -mod=readonly -tags=integration -run TestIntegrationSmoke -v ./... 2>&1 | tee integration.log
+          go test -mod=readonly -count=1 -tags=integration -run TestIntegrationSmoke -v ./... 2>&1 | tee integration.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             exit "$status"

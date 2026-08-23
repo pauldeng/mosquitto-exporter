@@ -59,7 +59,7 @@ meaningless numbers and must not be ported forward unchanged.
 |---|---|
 | `mosquitto_up` | 1 while connected to the broker and its `$SYS` tree is ticking, 0 otherwise. Scrape this to alert on broker/exporter connectivity instead of `absent()` on an arbitrary broker metric. |
 | `mosquitto_broker_info{mosquitto_version="..."}` | Info-metric pattern; always 1. `$SYS/broker/version` was previously read but never exported at all. |
-| `mosquitto_exporter_unknown_topics_total` | Counts `$SYS` topics received that are not in the exporter's static export table (deprecated aliases, the 24 dropped `load/**` series, anything else unrecognised). Not a broker health signal - a sustained increase means the broker is publishing something this exporter version doesn't know about yet. |
+| `mosquitto_exporter_unknown_topics_total` | Counts `$SYS` publishes whose topics are not recognised by the exporter's static table. Deprecated aliases are recognised and collapsed; the 24 intentionally dropped `load/**` series are recognised and excluded without incrementing this counter. A sustained increase means the broker is publishing something this exporter version does not know about yet. |
 
 `mosquitto_exporter_invalid_payloads_total` (a payload that didn't parse as a
 number) and `mosquitto_exporter_dropped_topics_total` (the topic cache was
@@ -86,8 +86,8 @@ also exported separately (e.g. `load_bytes_received_1min` was an EWMA of
 of these with `rate()` over the corresponding `_total` counter and a
 matching time window - `rate(mosquitto_broker_bytes_received_total[5m])`
 instead of `broker_load_bytes_received_5min`, for example. There is no
-recording-rule shim for these: the underlying broker no longer publishes the
-data to alias.
+recording-rule shim for these: the exporter no longer exposes the broker's
+EWMA samples under any metric name.
 
 ### Bridge status: metric name -> label
 
@@ -110,13 +110,10 @@ the new names - it is a bridge, not a permanent shim.
 
 **Caveats:**
 
-- A recording rule always produces a gauge in Prometheus's own bookkeeping,
-  regardless of the source type. This does not change the *values* it
-  records (a counter's raw value stream is preserved byte-for-byte, so
-  `rate()` against the recorded series still works correctly) - it only
-  means tooling that inspects `# TYPE` will see `gauge` for the aliased
-  series. If that matters to you, migrate the query instead of relying on
-  the alias.
+- Recording rules store the resulting samples, not the source exposition's
+  `# TYPE` metadata. A counter's raw value stream is preserved, so `rate()`
+  against these compatibility series still works; tooling that requires
+  original exposition metadata should migrate to the new metric instead.
 - For the three metrics whose type actually changed *for the better*
   (`clients_total`, `clients_maximum`, `uptime` - all were wrongly Counters),
   the recording rule still forwards the raw value, but any `rate()` query you

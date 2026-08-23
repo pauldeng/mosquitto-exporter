@@ -40,7 +40,7 @@ mosquitto_exporter_dropped_topics_total 0
 # HELP mosquitto_exporter_invalid_payloads_total Total number of $SYS payloads that could not be parsed as a number and were therefore not recorded.
 # TYPE mosquitto_exporter_invalid_payloads_total counter
 mosquitto_exporter_invalid_payloads_total 0
-# HELP mosquitto_exporter_unknown_topics_total Total number of $SYS topics received that are not in the exporter's static export table and were therefore not recorded.
+# HELP mosquitto_exporter_unknown_topics_total Total number of $SYS publishes received on topics that are not in the exporter's static export table and were therefore not recorded.
 # TYPE mosquitto_exporter_unknown_topics_total counter
 mosquitto_exporter_unknown_topics_total 1
 # HELP mosquitto_up Whether the exporter is currently connected to the Mosquitto broker and its $SYS tree is fresh (1) or not (0).

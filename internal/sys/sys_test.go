@@ -188,6 +188,8 @@ func TestResolve_unknownTopics(t *testing.T) {
 		{"documented but never published (mqtt.8 bug)", "$SYS/broker/mqtt/publish/received"},
 		{"log topic is never a metric", "$SYS/broker/log/N"},
 		{"made up topic", "$SYS/broker/does/not/exist"},
+		{"future load topic is unknown", "$SYS/broker/load/new/family/1min"},
+		{"known load family with future window is unknown", "$SYS/broker/load/messages/received/30min"},
 		{"not a $SYS topic at all", "some/other/topic"},
 		{"empty topic", ""},
 		// The bridge prefix/suffix would overlap on their shared "/" if the

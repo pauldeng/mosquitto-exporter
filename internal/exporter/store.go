@@ -39,9 +39,9 @@ type cachedSample struct {
 
 // Store is the single source of truth for every exportable $SYS value the
 // exporter has seen, and the single Prometheus Collector that renders them.
-// It is keyed on the raw $SYS topic, not on the rendered metric name,
-// because several topics can resolve to the same metric name under
-// different label values (e.g. per-bridge `mosquitto_broker_bridge_connected`).
+// It is normally keyed on the raw $SYS topic. Alias topics resolving to the
+// same name and labels update the first cached entry instead of creating a
+// duplicate series.
 //
 // Every resolved sample comes from sys.Resolve, which is also what decides
 // whether a topic is exported at all (DESIGN.md §5.4's static table replaces
@@ -98,7 +98,7 @@ func NewStore(sysInterval time.Duration) *Store {
 		),
 		unknownDesc: prometheus.NewDesc(
 			"mosquitto_exporter_unknown_topics_total",
-			"Total number of $SYS topics received that are not in the exporter's static export table and were therefore not recorded.",
+			"Total number of $SYS publishes received on topics that are not in the exporter's static export table and were therefore not recorded.",
 			nil, nil,
 		),
 		droppedDesc: prometheus.NewDesc(
@@ -131,21 +131,13 @@ func (s *Store) Update(topic, payload string) {
 		return
 	}
 
-	if topic == uptimeTopic {
+	if topic == uptimeTopic && s.connected {
 		s.lastUptime = time.Now()
 	}
 
-	if cached, known := s.samples[topic]; known {
+	if cached, known := s.samples[topic]; known && sample.Name != "mosquitto_broker_info" {
 		cached.value = sample.Value
 		s.samples[topic] = cached
-		return
-	}
-	if len(s.samples) >= maxTrackedTopics {
-		// Never evict a topic we already track: $SYS is change-gated, so a
-		// healthy-but-constant topic (publish_messages_dropped sitting at 0)
-		// can legitimately go hours without a republish. Dropping it would
-		// make the series vanish exactly when everything is fine.
-		s.droppedTopics++
 		return
 	}
 
@@ -158,7 +150,34 @@ func (s *Store) Update(topic, payload string) {
 		s.droppedTopics++
 		return
 	}
-	s.samples[topic] = cachedSample{value: sample.Value, kind: sample.Kind, desc: desc}
+	next := cachedSample{value: sample.Value, kind: sample.Kind, desc: desc}
+	if _, known := s.samples[topic]; known {
+		// Replace the whole sample, not just its value: info-metric labels can
+		// change after a broker upgrade.
+		s.samples[topic] = next
+		return
+	}
+
+	// Alias topics share a descriptor. Keep one cache entry and let the most
+	// recent publish win, avoiding duplicate or map-order-dependent samples.
+	// ponytail: this linear scan is capped at 1,024 entries; add a descriptor
+	// index only if profiles show alias updates matter.
+	for key, cached := range s.samples {
+		if cached.desc.String() == desc.String() {
+			s.samples[key] = next
+			return
+		}
+	}
+
+	if len(s.samples) >= maxTrackedTopics {
+		// Never evict a topic we already track: $SYS is change-gated, so a
+		// healthy-but-constant topic (publish_messages_dropped sitting at 0)
+		// can legitimately go hours without a republish. Dropping it would
+		// make the series vanish exactly when everything is fine.
+		s.droppedTopics++
+		return
+	}
+	s.samples[topic] = next
 }
 
 // SetConnected records the broker connection state. Called from the
@@ -167,6 +186,11 @@ func (s *Store) Update(topic, payload string) {
 func (s *Store) SetConnected(v bool) {
 	s.mu.Lock()
 	s.connected = v
+	if !v {
+		// A reconnect must prove liveness with a new uptime publish; otherwise
+		// a recent heartbeat from the previous session can expose stale data.
+		s.lastUptime = time.Time{}
+	}
 	s.mu.Unlock()
 }
 
@@ -206,21 +230,7 @@ func (s *Store) Collect(ch chan<- prometheus.Metric) {
 	if up == 0 {
 		return
 	}
-	// Two different $SYS topics can resolve to the same exported series: a
-	// deprecated alias (e.g. clients/active -> mosquitto_broker_clients_connected)
-	// or a duplicate (messages/stored + store/messages/count, DESIGN.md
-	// §6.2/§6.3, "collapsed 2->1"). Both stay cached under their own topic
-	// key per the "never evict a known topic" rule, but must render as one
-	// series here - Prometheus fails the whole scrape if the same metric
-	// name+labels is collected twice in one Collect call.
-	seen := make(map[string]bool, len(s.samples))
 	for _, sm := range s.samples {
-		key := sm.desc.String()
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-
 		valueType := prometheus.GaugeValue
 		if sm.kind == sys.Counter {
 			valueType = prometheus.CounterValue
