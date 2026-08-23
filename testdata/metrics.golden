@@ -22,3 +22,9 @@ broker_shared_subscriptions_count 0
 # HELP broker_uptime $SYS/broker/uptime
 # TYPE broker_uptime counter
 broker_uptime 12345
+# HELP mosquitto_exporter_invalid_payloads_total Total number of $SYS payloads that could not be parsed as a number and were therefore not recorded.
+# TYPE mosquitto_exporter_invalid_payloads_total counter
+mosquitto_exporter_invalid_payloads_total 0
+# HELP mosquitto_up Whether the exporter is currently connected to the Mosquitto broker (1) or not (0).
+# TYPE mosquitto_up gauge
+mosquitto_up 1

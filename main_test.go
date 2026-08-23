@@ -1,8 +1,11 @@
 package main
 
-// Phase 0 safety net: these tests pin TODAY's behaviour (bugs included) so
-// later phases can prove exactly what they changed. See DESIGN.md §7 Phase 0
-// and §3.1 for the defect IDs (C1-C5) referenced in comments below.
+// Phase 0 safety net, since updated for Phase 1: these tests pinned Phase
+// 0's behaviour (bugs included); Phase 1 replaced the global
+// counterMetrics/gaugeMetrics maps and per-topic dynamic registration with
+// the Store type (store.go), so the tests below now exercise Store instead.
+// See DESIGN.md §7 Phase 1 and §3.1 for the defect IDs (C1-C6) referenced in
+// comments below.
 
 import (
 	"flag"
@@ -21,21 +24,29 @@ import (
 
 var updateGolden = flag.Bool("update", false, "update testdata golden files")
 
-// resetGlobalState clears the package-level counterMetrics/gaugeMetrics maps
-// and unregisters their collectors from the default Prometheus registry, so
-// each test starts from a clean slate. This is a workaround for a real
-// design problem (global mutable registry state, fixed properly in Phase 1
-// by the value-store collector) - not something Phase 0 is allowed to fix.
-func resetGlobalState(tb testing.TB) {
-	tb.Helper()
-	for topic, m := range counterMetrics {
-		prometheus.Unregister(m)
-		delete(counterMetrics, topic)
-	}
-	for topic, m := range gaugeMetrics {
-		prometheus.Unregister(m)
-		delete(gaugeMetrics, topic)
-	}
+// sharedStore is registered into the default Prometheus registry exactly
+// once for the whole test binary (mirroring production: runServer also
+// calls prometheus.MustRegister(store) exactly once). Store is an
+// "unchecked" Collector - Describe sends no descriptors, since its metric
+// set is determined by broker-controlled topics at runtime - and
+// client_golang has no supported way to unregister an unchecked collector
+// (registry.go tracks them in a plain slice with no removal path), so tests
+// that need the default registry share this one instance and clear its
+// state between runs instead of registering a fresh Store per test.
+var sharedStore = NewStore()
+
+func init() {
+	prometheus.MustRegister(sharedStore)
+}
+
+// resetStore clears a Store back to its zero state. White-box (same
+// package) test helper, standing in for the old resetGlobalState.
+func resetStore(s *Store) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.samples = make(map[string]sample)
+	s.connected = false
+	s.invalidPayloads = 0
 }
 
 // TestParseTopic pins parseTopic's output for all 56 real Mosquitto 2.1.2
@@ -124,49 +135,147 @@ func TestParseTopic(t *testing.T) {
 	}
 }
 
-// TestParseValue pins parseValue's output, including where it is wrong today.
+// TestParseValue pins parseValue's output. Phase 1 changed its signature to
+// (float64, bool) and fixed C5 (parse failure is no longer indistinguishable
+// from a genuine zero) and C6 (a negative integer no longer loses its sign).
 func TestParseValue(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		payload string
-		want    float64
+		name      string
+		payload   string
+		wantValue float64
+		wantOK    bool
 	}{
-		{name: "trailing unit text", payload: "1234 seconds", want: 1234},
+		{name: "trailing unit text", payload: "1234 seconds", wantValue: 1234, wantOK: true},
 		// Picks the first "digits.digits" run and stops there - never notices
-		// the second ".2". A real defect in the parse (not one of C1-C5, but
-		// worth pinning): this payload is never actually routed here in
-		// production because "$SYS/broker/version" is in ignoreKeyMetrics.
-		{name: "dotted version string", payload: "mosquitto version 2.1.2", want: 2.1},
-		{name: "zero with decimals", payload: "0.00", want: 0},
-		// Quirk: the regex's `-?` only applies to the decimal alternative
-		// (`-?\d+\.\d+`), not the bare-integer alternative (`\d+`). A negative
-		// integer therefore loses its sign; a negative decimal keeps it.
-		{name: "negative integer loses its sign", payload: "-5", want: 5},
-		{name: "negative decimal keeps its sign", payload: "-5.5", want: -5.5},
-		// C5: parse failure is indistinguishable from a genuine zero sample.
-		{name: "empty string (C5: silent 0)", payload: "", want: 0},
-		{name: "non-numeric garbage (C5: silent 0)", payload: "garbage", want: 0},
+		// the second ".2". A pre-existing parsing quirk, not one of C1-C6: this
+		// payload is never actually routed here in production because
+		// "$SYS/broker/version" is in ignoreKeyMetrics.
+		{name: "dotted version string", payload: "mosquitto version 2.1.2", wantValue: 2.1, wantOK: true},
+		{name: "zero with decimals", payload: "0.00", wantValue: 0, wantOK: true},
+		// C6 (fixed): the old regex's `-?` only applied to the decimal
+		// alternative (`-?\d+\.\d+`), not the bare-integer alternative
+		// (`\d+`), so a negative integer lost its sign while a negative
+		// decimal kept it. Both now keep their sign.
+		{name: "negative integer keeps its sign (C6 fixed)", payload: "-5", wantValue: -5, wantOK: true},
+		{name: "negative decimal keeps its sign", payload: "-5.5", wantValue: -5.5, wantOK: true},
+		// C5 (fixed): parse failure now reports ok=false instead of a silent 0.
+		{name: "empty string (C5 fixed: no sample)", payload: "", wantValue: 0, wantOK: false},
+		{name: "non-numeric garbage (C5 fixed: no sample)", payload: "garbage", wantValue: 0, wantOK: false},
 		// C5 via a second path: strconv.ParseFloat's range error on an
-		// out-of-float64-range literal is swallowed the same way as a parse
-		// failure, again yielding an indistinguishable silent 0.
-		{name: "huge value overflows float64 (C5: silent 0)", payload: strings.Repeat("9", 400), want: 0},
-		{name: "huge but in-range value parses fine", payload: strings.Repeat("9", 20), want: 1e+20},
+		// out-of-float64-range literal is now also reported as ok=false.
+		{name: "huge value overflows float64 (C5 fixed: no sample)", payload: strings.Repeat("9", 400), wantValue: 0, wantOK: false},
+		{name: "huge but in-range value parses fine", payload: strings.Repeat("9", 20), wantValue: 1e+20, wantOK: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := parseValue(tt.payload); got != tt.want {
-				t.Errorf("parseValue(%q) = %v, want %v", tt.payload, got, tt.want)
+			gotValue, gotOK := parseValue(tt.payload)
+			if gotValue != tt.wantValue || gotOK != tt.wantOK {
+				t.Errorf("parseValue(%q) = (%v, %v), want (%v, %v)", tt.payload, gotValue, gotOK, tt.wantValue, tt.wantOK)
 			}
 		})
 	}
 }
 
-// goldenMessages is the fixed set of $SYS messages fed through processUpdate
-// for TestMetricsGolden. It deliberately covers: the counter path, the gauge
-// path, both awkward real topic strings, and topics in ignoreKeyMetrics
-// (which must produce no metric at all).
+// renderStore registers s into a throwaway private registry, renders
+// /metrics from it, and returns the deterministic subset of the body
+// matching names. A private registry (not the default one) is fine here
+// since none of TestStore needs process_*/go_* alongside it.
+func renderStore(s *Store, names map[string]bool) string {
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(s)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	promhttp.HandlerFor(reg, promhttp.HandlerOpts{}).ServeHTTP(rec, req)
+
+	return filterMetricFamilies(rec.Body.String(), names)
+}
+
+// TestStore covers Store's behaviour directly: gauge vs counter
+// classification, ignored topics, invalid-payload counting (C5), and Reset.
+func TestStore(t *testing.T) {
+	t.Parallel()
+
+	t.Run("gauge and counter classification, ignored topic, mosquitto_up", func(t *testing.T) {
+		t.Parallel()
+		s := NewStore()
+		s.Update("$SYS/broker/bytes/received", "1024")       // counter
+		s.Update("$SYS/broker/clients/connected", "2")       // gauge
+		s.Update("$SYS/broker/timestamp", "Thu Jan 01 1970") // ignored topic: no metric
+		s.SetConnected(true)
+
+		want := `# HELP broker_bytes_received $SYS/broker/bytes/received
+# TYPE broker_bytes_received counter
+broker_bytes_received 1024
+# HELP broker_clients_connected $SYS/broker/clients/connected
+# TYPE broker_clients_connected gauge
+broker_clients_connected 2
+# HELP mosquitto_up Whether the exporter is currently connected to the Mosquitto broker (1) or not (0).
+# TYPE mosquitto_up gauge
+mosquitto_up 1
+`
+		names := map[string]bool{"broker_bytes_received": true, "broker_clients_connected": true, "mosquitto_up": true, "broker_timestamp": true}
+		if got := renderStore(s, names); got != want {
+			t.Errorf("got:\n%s\nwant:\n%s", got, want)
+		}
+	})
+
+	t.Run("invalid payload is counted, not recorded (C5)", func(t *testing.T) {
+		t.Parallel()
+		s := NewStore()
+		s.Update("$SYS/broker/bytes/received", "garbage")
+		s.Update("$SYS/broker/bytes/received", "still garbage")
+
+		want := `# HELP mosquitto_exporter_invalid_payloads_total Total number of $SYS payloads that could not be parsed as a number and were therefore not recorded.
+# TYPE mosquitto_exporter_invalid_payloads_total counter
+mosquitto_exporter_invalid_payloads_total 2
+`
+		// broker_bytes_received is filtered for too: both Updates failed to
+		// parse, so no sample was ever recorded for that topic (C5) - it must
+		// not appear in the output at all.
+		names := map[string]bool{"mosquitto_exporter_invalid_payloads_total": true, "broker_bytes_received": true}
+		if got := renderStore(s, names); got != want {
+			t.Errorf("got:\n%s\nwant:\n%s", got, want)
+		}
+	})
+
+	t.Run("Reset zeroes values but keeps the series (today's --reset-metrics behaviour)", func(t *testing.T) {
+		t.Parallel()
+		s := NewStore()
+		s.Update("$SYS/broker/bytes/received", "1024")
+		s.Reset()
+
+		want := `# HELP broker_bytes_received $SYS/broker/bytes/received
+# TYPE broker_bytes_received counter
+broker_bytes_received 0
+`
+		if got := renderStore(s, map[string]bool{"broker_bytes_received": true}); got != want {
+			t.Errorf("got:\n%s\nwant:\n%s", got, want)
+		}
+	})
+
+	t.Run("SetConnected(false) reports mosquitto_up 0", func(t *testing.T) {
+		t.Parallel()
+		s := NewStore()
+		s.SetConnected(true)
+		s.SetConnected(false)
+
+		want := `# HELP mosquitto_up Whether the exporter is currently connected to the Mosquitto broker (1) or not (0).
+# TYPE mosquitto_up gauge
+mosquitto_up 0
+`
+		if got := renderStore(s, map[string]bool{"mosquitto_up": true}); got != want {
+			t.Errorf("got:\n%s\nwant:\n%s", got, want)
+		}
+	})
+}
+
+// goldenMessages is the fixed set of $SYS messages fed through
+// sharedStore.Update for TestMetricsGolden. It deliberately covers: the
+// counter path, the gauge path, both awkward real topic strings, and topics
+// in ignoreKeyMetrics (which must produce no metric at all).
 var goldenMessages = []struct {
 	topic   string
 	payload string
@@ -189,18 +298,22 @@ var goldenMessages = []struct {
 	{"$SYS/broker/clients/active", "2"},
 }
 
-// goldenMetricNames lists the metric names goldenMessages is expected to
-// produce - used to filter the rendered /metrics body down to a
-// deterministic subset for the golden-file comparison.
+// goldenMetricNames lists the metric names goldenMessages (plus the fixed
+// mosquitto_up / mosquitto_exporter_invalid_payloads_total series every
+// Store exposes) are expected to produce - used to filter the rendered
+// /metrics body down to a deterministic subset for the golden-file
+// comparison.
 var goldenMetricNames = map[string]bool{
-	"broker_bytes_received":             true,
-	"broker_messages_sent":              true,
-	"broker_clients_total":              true,
-	"broker_uptime":                     true,
-	"broker_clients_connected":          true,
-	"broker_retained_messages_count":    true,
-	"broker_shared_subscriptions_count": true,
-	"broker_load_connections_1min":      true,
+	"broker_bytes_received":                     true,
+	"broker_messages_sent":                      true,
+	"broker_clients_total":                      true,
+	"broker_uptime":                             true,
+	"broker_clients_connected":                  true,
+	"broker_retained_messages_count":            true,
+	"broker_shared_subscriptions_count":         true,
+	"broker_load_connections_1min":              true,
+	"mosquitto_up":                              true,
+	"mosquitto_exporter_invalid_payloads_total": true,
 }
 
 // filterMetricFamilies keeps only the "# HELP name / # TYPE name / value..."
@@ -227,21 +340,21 @@ func filterMetricFamilies(body string, names map[string]bool) string {
 // TestMetricsGolden renders /metrics from a fixed set of injected messages
 // and compares the deterministic mosquitto_-derived series against a golden
 // file. It also asserts (without pinning volatile values) that at least one
-// process_* and one go_* series is present, so their loss in Phase 4 fails
-// CI instead of shipping silently (DESIGN.md §6.4).
+// process_* and one go_* series is present, so their loss in a later phase
+// fails CI instead of shipping silently (DESIGN.md §6.4).
 //
-// Not parallel: mutates the process-wide counterMetrics/gaugeMetrics maps
-// and the default Prometheus registry, so it cannot run alongside other
-// tests touching that shared state until Phase 1 removes it.
+// Not parallel: shares sharedStore and the default Prometheus registry with
+// TestProcessUpdate_Race and BenchmarkProcessUpdate.
 //
 //nolint:paralleltest // shared global registry state, see comment above
 func TestMetricsGolden(t *testing.T) {
-	resetGlobalState(t)
-	t.Cleanup(func() { resetGlobalState(t) })
+	resetStore(sharedStore)
+	t.Cleanup(func() { resetStore(sharedStore) })
 
 	for _, m := range goldenMessages {
-		processUpdate(m.topic, m.payload)
+		sharedStore.Update(m.topic, m.payload)
 	}
+	sharedStore.SetConnected(true)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/metrics", nil)
@@ -275,18 +388,16 @@ func TestMetricsGolden(t *testing.T) {
 	}
 }
 
-// TestProcessUpdate_Race proves C1 and C2 (DESIGN.md §3.1): a plain float64
-// written by the MQTT callback goroutine and read by promhttp's scrape
-// goroutine (C1), and unsynchronised concurrent access to the
-// counterMetrics/gaugeMetrics maps between the feeder and resetMetrics()
-// - which runs on paho's OnConnectionLost goroutine in production (C2).
+// TestProcessUpdate_Race proves C1 and C2 are fixed (DESIGN.md §3.1): a
+// feeder goroutine calling Store.Update concurrently with a scraper
+// rendering /metrics (which calls Store.Collect) and a resetter calling
+// Store.Reset - simulating paho's OnConnectionLost goroutine in production.
+// All three now go through the same sync.RWMutex in store.go.
 //
-// Captured `go test -race -run TestProcessUpdate_Race` output (skip removed
-// locally to run it), 2026-08-23:
-// Actual `go test -race -run TestProcessUpdate_Race` output captured
-// 2026-08-23 (skip removed locally to run it; trimmed to 2 of the 8 WARNING
-// blocks plus the fatal crash - the full 388-line capture is quoted in full
-// in the Phase 0 handoff report):
+// Captured `go test -race -run TestProcessUpdate_Race` output from Phase 0,
+// before this fix, 2026-08-23 (trimmed to 2 of the 8 WARNING blocks plus the
+// fatal crash - the full 388-line capture is quoted in full in the Phase 0
+// handoff report):
 //
 //	==================
 //	WARNING: DATA RACE
@@ -333,22 +444,27 @@ func TestMetricsGolden(t *testing.T) {
 //
 // The fatal crash (not just a WARNING) is C2 exactly as documented in
 // DESIGN.md §3.1: "Concurrent map read+write is a fatal runtime throw, not
-// merely a race." Phase 1's definition of done for C1/C2 is deleting the
-// t.Skip below and having this test pass under -race.
+// merely a race." Phase 1 replaced the racy globals with Store's
+// mutex-guarded map, so this test is unskipped and passes under -race - see
+// the verification output in the Phase 1 handoff report.
 //
-// Not parallel: the entire point of this test is unsynchronised concurrent
-// access to shared global state, so running it alongside other tests would
-// only add unrelated noise to what it's proving.
+// Not parallel: the entire point of this test is concurrent access to
+// shared state from three goroutines at once, so running it alongside other
+// tests would only add unrelated noise to what it's proving.
 //
-//nolint:paralleltest // deliberately racy against shared global state, see comment above
+//nolint:paralleltest // deliberately concurrent against shared state, see comment above
 func TestProcessUpdate_Race(t *testing.T) {
-	t.Skip("fails today under -race: proves C1/C2 (see captured report above); unskip in Phase 1")
+	resetStore(sharedStore)
+	t.Cleanup(func() { resetStore(sharedStore) })
 
-	resetGlobalState(t)
-	t.Cleanup(func() { resetGlobalState(t) })
-
+	// close(done) broadcasts to every receiver. time.After does NOT: its
+	// channel yields exactly one value, so with three goroutines selecting
+	// on it, one exits and the other two spin forever (hang + unbounded
+	// allocation). That bug OOM-killed this test at 4.6GB before it was
+	// caught; do not "simplify" this back to time.After.
 	const duration = 200 * time.Millisecond
-	stop := time.After(duration)
+	done := make(chan struct{})
+	time.AfterFunc(duration, func() { close(done) })
 	var wg sync.WaitGroup
 
 	// Feeder: repeatedly creates brand-new topics (forces map writes, not
@@ -359,24 +475,26 @@ func TestProcessUpdate_Race(t *testing.T) {
 		i := 0
 		for {
 			select {
-			case <-stop:
+			case <-done:
 				return
 			default:
-				processUpdate("$SYS/broker/bytes/received", "1")
-				processUpdate("$SYS/broker/dynamic/"+strconv.Itoa(i), "1")
+				sharedStore.Update("$SYS/broker/bytes/received", "1")
+				// Bounded key space: distinct-key map writes are what this
+				// exercises; an unbounded one just exhausts RAM.
+				sharedStore.Update("$SYS/broker/dynamic/"+strconv.Itoa(i%64), "1")
 				i++
 			}
 		}
 	}()
 
-	// Scraper: repeatedly renders /metrics, invoking Collect() on every
-	// registered MosquittoCounter concurrently with the feeder's Set calls.
+	// Scraper: repeatedly renders /metrics, invoking Store.Collect
+	// concurrently with the feeder's Update calls.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for {
 			select {
-			case <-stop:
+			case <-done:
 				return
 			default:
 				rec := httptest.NewRecorder()
@@ -387,16 +505,16 @@ func TestProcessUpdate_Race(t *testing.T) {
 	}()
 
 	// Resetter: simulates paho's OnConnectionLost callback goroutine, which
-	// calls resetMetrics() concurrently with the feeder's map writes.
+	// calls Store.Reset concurrently with the feeder's map writes.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for {
 			select {
-			case <-stop:
+			case <-done:
 				return
 			default:
-				resetMetrics()
+				sharedStore.Reset()
 			}
 		}
 	}()
@@ -404,15 +522,16 @@ func TestProcessUpdate_Race(t *testing.T) {
 	wg.Wait()
 }
 
-// BenchmarkProcessUpdate measures the steady-state hot path: an already
-// registered topic receiving a new value. This is what every message after
-// the first hits, and per DESIGN.md §3.5 (P1) it still compiles a fresh
-// regexp on every single call via parseValue - Phase 1 hoists that regexp to
-// a package-level var. Baseline numbers recorded in the Phase 0 handoff
-// report are the no-regression reference for gate G6.
+// BenchmarkProcessUpdate measures the steady-state hot path: an already-seen
+// topic receiving a new value. This is what every message after the first
+// hits. Per DESIGN.md §3.5 (P1), Phase 0's version still compiled a fresh
+// regexp on every single call via parseValue; Phase 1 hoists that regexp
+// (and parseTopic's replacer, P2) to package-level vars. Baseline numbers
+// recorded in the Phase 0 handoff report (3.8 µs/op, 37 allocs/op) are the
+// no-regression reference for gate G6.
 func BenchmarkProcessUpdate(b *testing.B) {
-	resetGlobalState(b)
-	b.Cleanup(func() { resetGlobalState(b) })
+	resetStore(sharedStore)
+	b.Cleanup(func() { resetStore(sharedStore) })
 
 	topics := []string{
 		"$SYS/broker/bytes/received",
@@ -425,17 +544,17 @@ func BenchmarkProcessUpdate(b *testing.B) {
 		payloads[i] = strconv.Itoa(i)
 	}
 
-	// Pre-warm outside the timed loop: register every topic once so the
-	// benchmark measures only the "already registered" path (parseValue +
-	// map lookup + Set), not one-time registration cost.
+	// Pre-warm outside the timed loop: seed every topic once so the
+	// benchmark measures only the "already seen" path (parseValue +
+	// classifyTopic + map lookup + mutex), not one-time map-growth cost.
 	for _, topic := range topics {
-		processUpdate(topic, "0")
+		sharedStore.Update(topic, "0")
 	}
 
 	b.ReportAllocs()
 	i := 0
 	for b.Loop() {
-		processUpdate(topics[i%len(topics)], payloads[i%len(payloads)])
+		sharedStore.Update(topics[i%len(topics)], payloads[i%len(payloads)])
 		i++
 	}
 }

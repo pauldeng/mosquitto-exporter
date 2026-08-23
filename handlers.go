@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"net/http"
+
+	log "github.com/sirupsen/logrus"
 )
 
 /*
@@ -21,5 +23,7 @@ var landingPage = []byte(fmt.Sprintf(`<html>
 
 func serveVersion(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(landingPage)
+	if _, err := w.Write(landingPage); err != nil {
+		log.Warnf("writing landing page response: %s", err)
+	}
 }

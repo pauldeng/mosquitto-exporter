@@ -4,8 +4,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 var (
@@ -29,96 +27,73 @@ var (
 		"$SYS/broker/clients/maximum":           "The maximum number of clients connected simultaneously since the broker started",
 		"$SYS/broker/clients/total":             "The total number of clients connected since the broker started.",
 	}
-	counterMetrics = map[string]*MosquittoCounter{}
-	gaugeMetrics   = map[string]prometheus.Gauge{}
 )
 
-func resetMetrics() {
-	for topic := range counterMetrics {
-		if counterMetrics[topic] != nil {
-			counterMetrics[topic].Set(0)
-		}
+// metricKind is the Prometheus metric type a topic is rendered as. Phase 1
+// keeps today's classification exactly (DESIGN.md §7 Phase 1 item 1); the
+// C-row reclassification (§3.4) is Phase 3 work.
+type metricKind uint8
+
+const (
+	kindGauge metricKind = iota
+	kindCounter
+)
+
+// classifyTopic reports how topic should be recorded: kind is meaningless
+// when ok is false. Ignored topics (deprecated aliases, static build-time
+// strings) produce no metric at all, exactly as before.
+func classifyTopic(topic string) (kind metricKind, ok bool) {
+	if _, ignored := ignoreKeyMetrics[topic]; ignored {
+		return 0, false
 	}
-	for topic := range gaugeMetrics {
-		if gaugeMetrics[topic] != nil {
-			gaugeMetrics[topic].Set(0)
-		}
+	if _, isCounter := counterKeyMetrics[topic]; isCounter {
+		return kindCounter, true
 	}
+	return kindGauge, true
 }
 
-func processUpdate(topic, payload string) {
-	//log.Printf("Got broker update with topic %s and data %s", topic, payload)
-	if _, ok := ignoreKeyMetrics[topic]; !ok {
-		if _, ok := counterKeyMetrics[topic]; ok {
-			// log.Printf("Processing counter metric %s with data %s", topic, payload)
-			processCounterMetric(topic, payload)
-		} else {
-			//log.Printf("Processing gauge metric %s with data %s", topic, payload)
-			processGaugeMetric(topic, payload)
-		}
-	}
-}
-
-func processCounterMetric(topic, payload string) {
-	if counterMetrics[topic] != nil {
-		value := parseValue(payload)
-		counterMetrics[topic].Set(value)
-	} else {
-		// create a mosquitto counter pointer
-		mCounter := NewMosquittoCounter(prometheus.NewDesc(
-			parseTopic(topic),
-			topic,
-			[]string{},
-			prometheus.Labels{},
-		))
-
-		// save it
-		counterMetrics[topic] = mCounter
-		// register the metric
-		prometheus.MustRegister(mCounter)
-		// add the first value
-		value := parseValue(payload)
-		counterMetrics[topic].Set(value)
-	}
-}
-
-func processGaugeMetric(topic, payload string) {
-	if gaugeMetrics[topic] != nil {
-		value := parseValue(payload)
-		gaugeMetrics[topic].Set(value)
-	} else {
-		gaugeMetrics[topic] = prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: parseTopic(topic),
-			Help: topic,
-		})
-		// register the metric
-		prometheus.MustRegister(gaugeMetrics[topic])
-		// add the first value
-		value := parseValue(payload)
-		gaugeMetrics[topic].Set(value)
-	}
-}
+// topicReplacer converts a $SYS topic into a Prometheus-safe metric name.
+// Hoisted to package level (P2, DESIGN.md §3.5): previously rebuilt via
+// four sequential strings.Replace(All) calls every time a topic was first
+// registered.
+var topicReplacer = strings.NewReplacer(
+	"/", "_",
+	" ", "_",
+	"-", "_",
+	".", "_",
+)
 
 func parseTopic(topic string) string {
 	name := strings.Replace(topic, "$SYS/", "", 1)
-	name = strings.ReplaceAll(name, "/", "_")
-	name = strings.ReplaceAll(name, " ", "_")
-	name = strings.ReplaceAll(name, "-", "_")
-	name = strings.ReplaceAll(name, ".", "_")
-	return name
+	return topicReplacer.Replace(name)
 }
 
-func parseValue(payload string) float64 {
-	// fmt.Printf("Payload %s \n", payload)
-	var validValue = regexp.MustCompile(`-?\d{1,}[.]\d{1,}|\d{1,}`)
-	// get the first value of the string
-	strArray := validValue.FindAllString(payload, 1)
-	if len(strArray) > 0 {
-		// parse to float
-		value, err := strconv.ParseFloat(strArray[0], 64)
-		if err == nil {
-			return value
-		}
+// validValue matches the first optionally-signed integer or decimal number
+// in a payload. Hoisted to package level (P1, DESIGN.md §3.5): previously
+// regexp.MustCompile ran on every single message via parseValue.
+//
+// Fixes C6: the old pattern `-?\d{1,}[.]\d{1,}|\d{1,}` bound `-?` only to
+// the decimal alternative, so "-5" parsed as 5 while "-5.5" kept its sign.
+// Moving `-?` outside the alternation applies it to both forms.
+var validValue = regexp.MustCompile(`-?\d+(?:\.\d+)?`)
+
+// parseValue extracts the first number in payload. ok is false when no
+// number is found, or it does not fit in a float64 (C5): callers must not
+// record a sample in that case, since 0 is a valid real value and has to
+// stay distinguishable from "failed to parse".
+//
+// "mosquitto version 2.1.2" -> (2.1, true): the regex stops at the first
+// dot-delimited run and never notices the second ".2". This is a pre-existing
+// parsing quirk, not one of C1-C6, and it is harmless in production because
+// $SYS/broker/version is in ignoreKeyMetrics and never reaches this function.
+func parseValue(payload string) (float64, bool) {
+	match := validValue.FindString(payload)
+	if match == "" {
+		return 0, false
 	}
-	return 0
+	value, err := strconv.ParseFloat(match, 64)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
 }
