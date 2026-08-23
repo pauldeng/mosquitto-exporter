@@ -1,9 +1,10 @@
-package main
+package exporter
 
 import (
 	"sync"
 	"time"
 
+	mosquittosys "github.com/pauldeng/mosquitto-exporter/internal/sys"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -13,7 +14,7 @@ import (
 // diagnostics described in DESIGN.md §5.3.
 type sample struct {
 	value    float64
-	kind     metricKind
+	kind     mosquittosys.Kind
 	lastSeen time.Time
 	desc     *prometheus.Desc
 }
@@ -95,12 +96,12 @@ func NewStore() *Store {
 // produces no sample - it is counted instead (C5: a parse failure must
 // never look like a genuine zero reading).
 func (s *Store) Update(topic, payload string) {
-	kind, ok := classifyTopic(topic)
+	kind, ok := mosquittosys.ClassifyTopic(topic)
 	if !ok {
 		return
 	}
 
-	value, ok := parseValue(payload)
+	value, ok := mosquittosys.ParseValue(payload)
 	if !ok {
 		s.mu.Lock()
 		s.invalidPayloads++
@@ -126,10 +127,10 @@ func (s *Store) Update(topic, payload string) {
 	}
 
 	valueType := prometheus.GaugeValue
-	if kind == kindCounter {
+	if kind == mosquittosys.Counter {
 		valueType = prometheus.CounterValue
 	}
-	desc := prometheus.NewDesc(parseTopic(topic), topic, nil, nil)
+	desc := prometheus.NewDesc(mosquittosys.TopicName(topic), topic, nil, nil)
 	if _, err := prometheus.NewConstMetric(desc, valueType, value); err != nil {
 		s.droppedTopics++
 		return
@@ -177,7 +178,7 @@ func (s *Store) Collect(ch chan<- prometheus.Metric) {
 
 	for _, sm := range s.samples {
 		valueType := prometheus.GaugeValue
-		if sm.kind == kindCounter {
+		if sm.kind == mosquittosys.Counter {
 			valueType = prometheus.CounterValue
 		}
 		metric, err := prometheus.NewConstMetric(sm.desc, valueType, sm.value)

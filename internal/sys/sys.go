@@ -1,4 +1,4 @@
-package main
+package sys
 
 import (
 	"regexp"
@@ -29,27 +29,27 @@ var (
 	}
 )
 
-// metricKind is the Prometheus metric type a topic is rendered as. Phase 1
+// Kind is the Prometheus metric type a topic is rendered as. Phase 1
 // keeps today's classification exactly (DESIGN.md §7 Phase 1 item 1); the
 // C-row reclassification (§3.4) is Phase 3 work.
-type metricKind uint8
+type Kind uint8
 
 const (
-	kindGauge metricKind = iota
-	kindCounter
+	Gauge Kind = iota
+	Counter
 )
 
 // classifyTopic reports how topic should be recorded: kind is meaningless
 // when ok is false. Ignored topics (deprecated aliases, static build-time
 // strings) produce no metric at all, exactly as before.
-func classifyTopic(topic string) (kind metricKind, ok bool) {
+func ClassifyTopic(topic string) (kind Kind, ok bool) {
 	if _, ignored := ignoreKeyMetrics[topic]; ignored {
 		return 0, false
 	}
 	if _, isCounter := counterKeyMetrics[topic]; isCounter {
-		return kindCounter, true
+		return Counter, true
 	}
-	return kindGauge, true
+	return Gauge, true
 }
 
 // topicReplacer converts a $SYS topic into a Prometheus-safe metric name.
@@ -63,7 +63,7 @@ var topicReplacer = strings.NewReplacer(
 	".", "_",
 )
 
-func parseTopic(topic string) string {
+func TopicName(topic string) string {
 	name := strings.Replace(topic, "$SYS/", "", 1)
 	return topicReplacer.Replace(name)
 }
@@ -86,7 +86,7 @@ var validValue = regexp.MustCompile(`-?\d+(?:\.\d+)?`)
 // dot-delimited run and never notices the second ".2". This is a pre-existing
 // parsing quirk, not one of C1-C6, and it is harmless in production because
 // $SYS/broker/version is in ignoreKeyMetrics and never reaches this function.
-func parseValue(payload string) (float64, bool) {
+func ParseValue(payload string) (float64, bool) {
 	match := validValue.FindString(payload)
 	if match == "" {
 		return 0, false

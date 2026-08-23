@@ -1,4 +1,4 @@
 bin/
-mosquitto-exporter
+/mosquitto-exporter
 coverage.out
 coverage.txt

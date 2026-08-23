@@ -8,7 +8,7 @@ package main
 // extends this to the full 56-topic inventory; this one stays deliberately
 // small.
 //
-// Run with: go test -tags=integration -run TestIntegrationSmoke -v .
+// Run with: go test -tags=integration -run TestIntegrationSmoke -v ./...
 // Skips cleanly if Docker isn't available, so it never fails on a laptop
 // without it.
 
@@ -142,7 +142,7 @@ func TestIntegrationSmoke(t *testing.T) {
 
 	binPath := t.TempDir() + "/mosquitto-exporter"
 	//nolint:gosec // G204: fixed "go build" subcommand, binPath is our own t.TempDir() path
-	build := exec.Command("go", "build", "-o", binPath, ".")
+	build := exec.Command("go", "build", "-o", binPath, "./cmd/mosquitto-exporter")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("building exporter: %v\n%s", err, out)
 	}

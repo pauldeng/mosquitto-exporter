@@ -1,4 +1,4 @@
-package main
+package exporter
 
 // Phase 1 lifecycle/TLS tests (DESIGN.md §7 Phase 1, §8 gates G4/G5). These
 // cover the pieces AGENT-2 owns in main.go: serve-before-connect (R1), TLS
@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pauldeng/mosquitto-exporter/internal/config"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -173,69 +174,6 @@ func TestTLSHandshake_VerifiesByDefault(t *testing.T) {
 	})
 }
 
-func TestValidateEndpoint(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		endpoint string
-		wantErr  bool
-	}{
-		{"plain tcp endpoint", "tcp://127.0.0.1:1883", false},
-		{"ssl endpoint", "ssl://broker.example.com:8883", false},
-		{"user and password in URL rejected (S3, decision 10.14)", "tcp://user:pass@127.0.0.1:1883", true},
-		{"bare username in URL rejected", "tcp://user@127.0.0.1:1883", true},
-		{"unparseable URL", "://not-a-url", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			err := validateEndpoint(tt.endpoint)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("validateEndpoint(%q) error = %v, wantErr %v", tt.endpoint, err, tt.wantErr)
-			}
-		})
-	}
-}
-
-//nolint:paralleltest // t.Setenv is incompatible with t.Parallel
-func TestResolvePassword(t *testing.T) {
-	t.Run("empty when nothing is set", func(t *testing.T) {
-		t.Setenv("MQTT_PASS", "")
-		got, err := resolvePassword("")
-		if err != nil || got != "" {
-			t.Fatalf("got (%q, %v), want (\"\", nil)", got, err)
-		}
-	})
-
-	t.Run("falls back to MQTT_PASS env var", func(t *testing.T) {
-		t.Setenv("MQTT_PASS", "s3cret")
-		got, err := resolvePassword("")
-		if err != nil || got != "s3cret" {
-			t.Fatalf("got (%q, %v), want (\"s3cret\", nil)", got, err)
-		}
-	})
-
-	t.Run("--pass-file takes precedence over MQTT_PASS and is trimmed", func(t *testing.T) {
-		t.Setenv("MQTT_PASS", "should-not-be-used")
-		dir := t.TempDir()
-		path := filepath.Join(dir, "pass")
-		if err := os.WriteFile(path, []byte("filesecret\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		got, err := resolvePassword(path)
-		if err != nil || got != "filesecret" {
-			t.Fatalf("got (%q, %v), want (\"filesecret\", nil)", got, err)
-		}
-	})
-
-	t.Run("missing --pass-file returns an error", func(t *testing.T) {
-		_, err := resolvePassword("/nonexistent/pass-file")
-		if err == nil {
-			t.Fatal("expected an error for a missing --pass-file")
-		}
-	})
-}
-
 func TestNewHTTPServer_AllTimeoutsSet(t *testing.T) {
 	t.Parallel()
 	srv := newHTTPServer("127.0.0.1:0", http.NewServeMux())
@@ -301,11 +239,10 @@ func TestRunServerServesWhileBrokerIsDownAndShutsDown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- newCommand().Run(ctx, []string{
-			appName,
-			"--endpoint", "tcp://127.0.0.1:1",
-			"--bind-address", addr,
-			"--reset-metrics=false",
+		done <- Run(ctx, config.Config{
+			Endpoint:    "tcp://127.0.0.1:1",
+			BindAddress: addr,
+			Version:     "test",
 		})
 	}()
 
@@ -345,7 +282,7 @@ func TestRunServerServesWhileBrokerIsDownAndShutsDown(t *testing.T) {
 func TestServeVersion(t *testing.T) {
 	t.Parallel()
 	rec := httptest.NewRecorder()
-	serveVersion(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	serveVersion("test")(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Mosquitto exporter") {
 		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
 	}

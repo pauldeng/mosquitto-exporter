@@ -25,9 +25,23 @@ jobs:
       - run: go vet -mod=readonly ./...
       - name: test, race, and coverage
         run: |
-          go test -mod=readonly -race -coverprofile=coverage.out ./...
+          go test -mod=readonly -race -coverprofile=coverage.out ./... | tee pkgcov.txt
           go tool cover -func=coverage.out | tee coverage.txt
-          awk '$1 == "total:" { sub(/%/, "", $3); if ($3 + 0 < 70) exit 1 }' coverage.txt
+          awk '$1 == "total:" { sub(/%/, "", $3); if ($3 + 0 < 70) { print "total coverage below 70%"; exit 1 } }' coverage.txt
+          # Per-package floors from DESIGN.md 8 G2. The total alone is not
+          # enough: internal/sys once sat at 42.9% while the total passed,
+          # because its tests had drifted into another package.
+          awk '
+            /coverage:/ {
+              pkg = $2; for (i = 1; i <= NF; i++) if ($i == "coverage:") { cov = $(i+1); sub(/%/, "", cov) }
+              floor = 0
+              if (pkg ~ /internal\/sys$/)      floor = 90
+              if (pkg ~ /internal\/config$/)   floor = 85
+              if (pkg ~ /internal\/exporter$/) floor = 60
+              if (cov + 0 < floor) { printf "%s coverage %.1f%% below floor %d%%\n", pkg, cov, floor; bad = 1 }
+            }
+            END { exit bad }
+          ' pkgcov.txt
 
   lint:
     runs-on: ubuntu-latest
@@ -59,7 +73,7 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
-      - run: go test -mod=readonly -run '^$' -fuzz=FuzzParsePayload -fuzztime=60s .
+      - run: go test -mod=readonly -run '^$' -fuzz=FuzzParsePayload -fuzztime=60s ./internal/sys
 
   integration:
     runs-on: ubuntu-latest

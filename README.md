@@ -6,7 +6,7 @@ A container image is built by `.goreleaser.yaml` on tagged releases, from
 the `Dockerfile` in this repo (distroless base, non-root):
 ```
 docker run \
-  -p 9234:9234 <image>:<tag> \
+  -p 9234:9234 pauldeng/mosquitto-exporter:<tag> \
   --endpoint tcp://mosquitto:1883
 ```
 
@@ -21,12 +21,13 @@ USAGE:
    mosquitto-exporter [global options]
 
 VERSION:
-   <git describe output, e.g. v1.0.0 or a commit hash for untagged builds>, go1.25.0
+   <release tag, git describe output, or dev for a plain go build>, go1.25.0
 
 AUTHORS:
    Johan Ryberg <johan@securit.se>
    Arturo Reuschenbach Puncernau <a.reuschenbach.puncernau@sap.com>
    Fabian Ruff <fabian.ruff@sap.com>
+   Paul Deng <dengpeng.cn@gmail.com>
 
 GLOBAL OPTIONS:
    --log-level string                Log level (debug|info|warn|error) (default: "info") [$LOG_LEVEL]
@@ -39,14 +40,15 @@ GLOBAL OPTIONS:
    --ca-cert string                  Location of a PEM-encoded CA certificate used to verify the broker's TLS certificate [$MQTT_CA_CERT]
    --insecure-skip-verify            Disable TLS certificate verification of the broker (INSECURE - only for testing) [$MQTT_INSECURE_SKIP_VERIFY]
    --client-id string, -i string     Client id to be used to connect to the Mosquitto message broker [$MQTT_CLIENT_ID]
-   --reset-metrics, -r               Reset metrics when losing connection to broker (default: true) [$RESET_METRICS]
+   --reset-metrics, -r               Reset metrics when losing connection to broker [$RESET_METRICS]
    --help, -h                        show help
    --version, -v                     print the version
 ```
 
 `VERSION` is injected at build time from the nearest git tag (see
-`VERSION` in the `Makefile` / `{{ .Tag }}` in `.goreleaser.yaml`), so the
-exact string above varies by build; it is never hand-maintained here.
+`VERSION` in the `Makefile` / `{{ .Tag }}` in `.goreleaser.yaml`). Plain
+`go build` uses the neutral value `dev`; release versions are never
+hand-maintained in source.
 
 ## Breaking changes since v0.7.7
 

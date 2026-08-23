@@ -1,4 +1,4 @@
-package main
+package exporter
 
 import (
 	"context"
@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -17,174 +16,15 @@ import (
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"github.com/pauldeng/mosquitto-exporter/internal/config"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/urfave/cli/v3"
 )
 
 const (
-	appName            = "mosquitto-exporter"
 	mqttConnectTimeout = 3 * time.Second
 )
-
-// logLevel backs the default logger's level and is set from --log-level /
-// LOG_LEVEL once flags are parsed (see newCommand's Before hook). Its zero
-// value is slog.LevelInfo, so logging before that point (e.g. a flag parse
-// error) still uses the documented default.
-var logLevel = new(slog.LevelVar)
-
-func init() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
-}
-
-// parseLogLevel validates --log-level against slog's own level parsing
-// (debug|info|warn|error, case-insensitive) rather than hand-rolling a
-// second parser for the same four names.
-func parseLogLevel(s string) (slog.Level, error) {
-	var level slog.Level
-	if err := level.UnmarshalText([]byte(s)); err != nil {
-		return 0, fmt.Errorf("invalid --log-level %q: %w", s, err)
-	}
-	return level, nil
-}
-
-func main() {
-	if err := newCommand().Run(context.Background(), os.Args); err != nil {
-		slog.Error("exiting", "error", err)
-		os.Exit(1)
-	}
-}
-
-func newCommand() *cli.Command {
-	return &cli.Command{
-		Name:    appName,
-		Version: versionString(),
-		Authors: []any{
-			"Johan Ryberg <johan@securit.se>",
-			"Arturo Reuschenbach Puncernau <a.reuschenbach.puncernau@sap.com>",
-			"Fabian Ruff <fabian.ruff@sap.com>",
-		},
-		Usage: "Prometheus exporter for broker metrics",
-		Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
-			level, err := parseLogLevel(cmd.String("log-level"))
-			if err != nil {
-				return ctx, err
-			}
-			logLevel.Set(level)
-			return ctx, nil
-		},
-		Action: runServer,
-		Flags: []cli.Flag{
-			&cli.StringFlag{
-				Name:    "log-level",
-				Usage:   "Log level (debug|info|warn|error)",
-				Value:   "info",
-				Sources: cli.EnvVars("LOG_LEVEL"),
-			},
-			&cli.StringFlag{
-				Name:    "endpoint",
-				Aliases: []string{"e"},
-				Usage:   "Endpoint for the Mosquitto message broker",
-				Sources: cli.EnvVars("BROKER_ENDPOINT"),
-				Value:   "tcp://127.0.0.1:1883",
-			},
-			&cli.StringFlag{
-				Name:    "bind-address",
-				Aliases: []string{"b"},
-				Usage:   "Listen address for metrics HTTP endpoint",
-				Value:   "0.0.0.0:9234",
-				Sources: cli.EnvVars("BIND_ADDRESS"),
-			},
-			&cli.StringFlag{
-				Name:    "user",
-				Aliases: []string{"u"},
-				Usage:   "Username for the Mosquitto message broker",
-				Value:   "",
-				Sources: cli.EnvVars("MQTT_USER"),
-			},
-			&cli.StringFlag{
-				Name:  "pass-file",
-				Usage: "Path to a file containing the password for the Mosquitto broker user (password can also come from MQTT_PASS; never pass it on argv)",
-				Value: "",
-				// Deliberately no env alias for MQTT_PASS here: reading MQTT_PASS
-				// via os.Getenv directly (see resolvePassword) so no CLI flag ever
-				// exists that would accept a password on argv (S3, decision 10.14).
-				Sources: cli.EnvVars("MQTT_PASS_FILE"),
-			},
-			&cli.StringFlag{
-				Name:    "cert",
-				Aliases: []string{"c"},
-				Usage:   "Location of a TLS certificate .pem file for the Mosquitto message broker",
-				Value:   "",
-				Sources: cli.EnvVars("MQTT_CERT"),
-			},
-			&cli.StringFlag{
-				Name:    "key",
-				Aliases: []string{"k"},
-				Usage:   "Location of a TLS private key .pem file for the Mosquitto message broker",
-				Value:   "",
-				Sources: cli.EnvVars("MQTT_KEY"),
-			},
-			&cli.StringFlag{
-				Name:    "ca-cert",
-				Usage:   "Location of a PEM-encoded CA certificate used to verify the broker's TLS certificate",
-				Value:   "",
-				Sources: cli.EnvVars("MQTT_CA_CERT"),
-			},
-			&cli.BoolFlag{
-				Name:    "insecure-skip-verify",
-				Usage:   "Disable TLS certificate verification of the broker (INSECURE - only for testing)",
-				Value:   false,
-				Sources: cli.EnvVars("MQTT_INSECURE_SKIP_VERIFY"),
-			},
-			&cli.StringFlag{
-				Name:    "client-id",
-				Aliases: []string{"i"},
-				Usage:   "Client id to be used to connect to the Mosquitto message broker",
-				Value:   "",
-				Sources: cli.EnvVars("MQTT_CLIENT_ID"),
-			},
-			&cli.BoolFlag{
-				Name:    "reset-metrics",
-				Aliases: []string{"r"},
-				Usage:   "Reset metrics when losing connection to broker",
-				Value:   true,
-				Sources: cli.EnvVars("RESET_METRICS"),
-			},
-		},
-	}
-}
-
-// validateEndpoint rejects a broker endpoint carrying embedded credentials
-// (e.g. tcp://user:pass@host), which would otherwise leak through `ps`,
-// shell history, and any log line that includes the endpoint (S3, decision
-// 10.14). Credentials belong only in --user / --pass-file / MQTT_PASS.
-func validateEndpoint(endpoint string) error {
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return fmt.Errorf("invalid endpoint %q: %w", endpoint, err)
-	}
-	if u.User != nil {
-		return fmt.Errorf("endpoint must not contain userinfo (user:pass@host); use --user/--pass-file or MQTT_USER/MQTT_PASS instead")
-	}
-	return nil
-}
-
-// resolvePassword reads the broker password from --pass-file, falling back
-// to the MQTT_PASS environment variable. There is deliberately no --pass
-// flag: a broker password must never be accepted on argv (S3).
-func resolvePassword(passFile string) (string, error) {
-	if passFile == "" {
-		return os.Getenv("MQTT_PASS"), nil
-	}
-	//nolint:gosec // G304: passFile is an operator-supplied path, the entire point of --pass-file
-	data, err := os.ReadFile(passFile)
-	if err != nil {
-		return "", fmt.Errorf("reading --pass-file %s: %w", passFile, err)
-	}
-	return strings.TrimRight(string(data), "\r\n"), nil
-}
 
 // buildTLSConfig assembles the broker TLS configuration, or returns (nil,
 // nil) when no TLS-related flag was set at all - in which case an ssl://
@@ -299,25 +139,19 @@ func newHTTPServer(bindAddress string, handler http.Handler) *http.Server {
 	}
 }
 
-func runServer(ctx context.Context, cmd *cli.Command) error {
-	slog.Info("starting", "app", appName, "version", versionString())
+func Run(ctx context.Context, cfg config.Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	slog.Info("starting", "app", "mosquitto-exporter", "version", cfg.Version)
 
 	// R4: SIGINT/SIGTERM cancel ctx, which drives both the connect-retry loop
 	// and the shutdown sequence below.
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	endpoint := cmd.String("endpoint")
-	if err := validateEndpoint(endpoint); err != nil {
-		return err
-	}
-
-	password, err := resolvePassword(cmd.String("pass-file"))
-	if err != nil {
-		return err
-	}
-
-	tlsConfig, err := buildTLSConfig(cmd.String("cert"), cmd.String("key"), cmd.String("ca-cert"), cmd.Bool("insecure-skip-verify"))
+	endpoint := cfg.Endpoint
+	tlsConfig, err := buildTLSConfig(cfg.CertFile, cfg.KeyFile, cfg.CACertFile, cfg.InsecureSkipVerify)
 	if err != nil {
 		return fmt.Errorf("configuring TLS: %w", err)
 	}
@@ -336,13 +170,13 @@ func runServer(ctx context.Context, cmd *cli.Command) error {
 	opts.Dialer.Timeout = mqttConnectTimeout
 	opts.AddBroker(endpoint)
 
-	if clientID := cmd.String("client-id"); clientID != "" {
+	if clientID := cfg.ClientID; clientID != "" {
 		opts.SetClientID(clientID)
 	}
-	if user := cmd.String("user"); user != "" {
+	if user := cfg.User; user != "" {
 		opts.SetUsername(user)
-		if password != "" {
-			opts.SetPassword(password)
+		if cfg.Password != "" {
+			opts.SetPassword(cfg.Password)
 		}
 	}
 	if tlsConfig != nil {
@@ -352,7 +186,7 @@ func runServer(ctx context.Context, cmd *cli.Command) error {
 		}
 	}
 
-	resetOnDisconnect := cmd.Bool("reset-metrics")
+	resetOnDisconnect := cfg.ResetMetrics
 	opts.OnConnect = func(client mqtt.Client) {
 		slog.Info("connected to broker", "endpoint", endpoint)
 		store.SetConnected(true)
@@ -380,9 +214,9 @@ func runServer(ctx context.Context, cmd *cli.Command) error {
 	// mutable state.
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
-	mux.HandleFunc("/", serveVersion)
+	mux.HandleFunc("/", serveVersion(cfg.Version))
 
-	srv := newHTTPServer(cmd.String("bind-address"), mux)
+	srv := newHTTPServer(cfg.BindAddress, mux)
 
 	serveErrCh := make(chan error, 1)
 	go func() {

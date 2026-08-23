@@ -1,4 +1,4 @@
-PKG_NAME:=github.com/pauldeng/mosquitto-exporter
+PKG_NAME:=github.com/pauldeng/mosquitto-exporter/cmd/mosquitto-exporter
 BUILD_DIR:=bin
 MOSQUITTO_EXPORTER_BINARY:=$(BUILD_DIR)/mosquitto_exporter
 IMAGE := pauldeng/mosquitto-exporter
@@ -12,8 +12,8 @@ LDFLAGS=-s -w -X main.Version=$(VERSION)
 help:
 	@echo
 	@echo "Available targets:"
-	@echo "  * build             - build the binary, output to $(ARC_BINARY)"
-	@echo "  * linux             - build the binary, output to $(ARC_BINARY)"
+	@echo "  * build             - build the binary, output to $(MOSQUITTO_EXPORTER_BINARY)"
+	@echo "  * linux             - build the binary, output to $(MOSQUITTO_EXPORTER_BINARY)"
 	@echo "  * docker            - build docker image"
 	@echo "  * lint              - run golangci-lint"
 	@echo "  * lint-fix          - run golangci-lint with --fix"
@@ -39,8 +39,7 @@ linux: build
 # from bin/ directly.
 docker: linux
 	cp $(MOSQUITTO_EXPORTER_BINARY) mosquitto-exporter
-	docker build -t $(IMAGE):$(VERSION) .
-	docker build -t $(IMAGE):latest .
+	docker build -t $(IMAGE):$(VERSION) -t $(IMAGE):latest .
 	rm -f mosquitto-exporter
 
 push:

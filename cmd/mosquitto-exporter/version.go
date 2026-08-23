@@ -6,9 +6,7 @@ import (
 	"runtime/debug"
 )
 
-var (
-	Version = "v0.7.7"
-)
+var Version = "dev"
 
 var Commit = func() string {
 	if info, ok := debug.ReadBuildInfo(); ok {
